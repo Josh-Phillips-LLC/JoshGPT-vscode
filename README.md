@@ -29,6 +29,7 @@ This starter provides a minimal `JoshGPT` VS Code extension that supports:
 - `src/lmstudio-client.js` - LM Studio API client
 - `src/mcp-client.js` - MCP HTTP client (streamable-http)
 - `src/local-shell-tool.js` - extension-host local shell tool execution
+- `src/local-shell-mirror.js` - dedicated terminal mirror for local shell tool calls
 - `src/chat-runner.js` - LM Studio + local shell + optional MCP tool-call loop
 - `scripts/smoke-test.sh` - endpoint smoke test (outside VS Code)
 
@@ -53,6 +54,7 @@ This starter provides a minimal `JoshGPT` VS Code extension that supports:
 - Trace pane shows execution events, not hidden model chain-of-thought tokens.
 - In native stream mode, trace includes raw stream event names and payload snippets.
 - Output channel logs tool calls with argument payloads (redacted/truncated for sensitive/large values).
+- Local shell execution is mirrored to a `JoshGPT Local Shell` terminal by default.
 
 ## Package Test
 
@@ -66,7 +68,7 @@ Install into an isolated extensions directory:
 
 ```bash
 code --extensions-dir /tmp/vscode-lmstudio-ext-test \
-  --install-extension ./joshgpt-0.0.8.vsix --force
+  --install-extension ./joshgpt-0.0.9.vsix --force
 ```
 
 Verify:
@@ -101,12 +103,16 @@ code --extensions-dir /tmp/vscode-lmstudio-ext-test --list-extensions | grep jos
 - `joshgpt.localShell.maxTimeoutSeconds`
 - `joshgpt.localShell.defaultMaxOutputChars`
 - `joshgpt.localShell.maxOutputChars`
+- `joshgpt.localShell.mirrorTerminalEnabled`
+- `joshgpt.localShell.mirrorTerminalName`
+- `joshgpt.localShell.mirrorTerminalReveal`
 
 ## Tool Calling (OpenAI-Compatible Mode)
 
 - JoshGPT always exposes `run_local_shell_command` when `joshgpt.localShell.enabled=true`.
   - Commands run in the extension host environment.
   - If VS Code is attached to a container, the command runs in that container.
+  - Mirror mode writes command/output/exit status to a dedicated terminal (`joshgpt.localShell.mirrorTerminal*` settings).
 - When `joshgpt.mcp.enabled=true`, JoshGPT also loads MCP tool metadata via `tools/list`.
 - MCP execution tools (`run_host_command`, `run_container_command`) are intentionally excluded from model exposure in JoshGPT.
 - Non-exec MCP tools are still available and executed through MCP `tools/call`.

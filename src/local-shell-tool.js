@@ -2,7 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { execFile } = require("child_process");
+const { spawn } = require("child_process");
 
 const LOCAL_SHELL_TOOL_NAME = "run_local_shell_command";
 
@@ -39,6 +39,43 @@ function truncateText(value, maxChars) {
     text: `${text.slice(0, headBudget)}${suffix}`,
     truncated: true
   };
+}
+
+function appendLimitedText(state, chunk, maxChars) {
+  const text = String(chunk || "");
+  if (!text) {
+    return;
+  }
+  if (state.text.length >= maxChars) {
+    state.truncated = true;
+    return;
+  }
+  const remaining = maxChars - state.text.length;
+  if (text.length > remaining) {
+    state.text += text.slice(0, remaining);
+    state.truncated = true;
+    return;
+  }
+  state.text += text;
+}
+
+function asFinalText(state, maxChars) {
+  const base = truncateText(state.text || "", maxChars);
+  return {
+    text: base.text,
+    truncated: Boolean(base.truncated || state.truncated)
+  };
+}
+
+function safeMirrorCall(mirror, methodName, payload) {
+  if (!mirror || typeof mirror[methodName] !== "function") {
+    return;
+  }
+  try {
+    mirror[methodName](payload);
+  } catch {
+    // Mirror is best-effort and must not break command execution.
+  }
 }
 
 function pickShell(command) {
@@ -120,7 +157,8 @@ async function runLocalShellToolCall(
     defaultTimeoutSeconds = 30,
     maxTimeoutSeconds = 300,
     defaultMaxOutputChars = 12000,
-    maxOutputCharsCap = 50000
+    maxOutputCharsCap = 50000,
+    mirror = null
   } = {}
 ) {
   const command = String(input && input.command ? input.command : "").trim();
@@ -145,57 +183,105 @@ async function runLocalShellToolCall(
   const shell = pickShell(command);
   const startedAt = Date.now();
 
+  safeMirrorCall(mirror, "onStart", {
+    tool: LOCAL_SHELL_TOOL_NAME,
+    command,
+    cwd,
+    shell: shell.executable,
+    shell_args: shell.args,
+    timeout_seconds: timeoutSeconds,
+    max_output_chars: maxOutputChars,
+    started_at: new Date(startedAt).toISOString()
+  });
+
   return new Promise((resolve) => {
-    execFile(
-      shell.executable,
-      shell.args,
-      {
-        cwd,
-        env: process.env,
-        timeout: timeoutSeconds * 1000,
-        maxBuffer: Math.max(maxOutputChars * 6, 1024 * 1024)
-      },
-      (error, stdout, stderr) => {
-        const elapsedMs = Date.now() - startedAt;
-        const stdoutTrunc = truncateText(stdout || "", maxOutputChars);
-        const stderrTrunc = truncateText(stderr || "", maxOutputChars);
+    const child = spawn(shell.executable, shell.args, {
+      cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
 
-        let exitCode = 0;
-        let signal = "";
-        let timedOut = false;
-        if (error) {
-          if (typeof error.code === "number") {
-            exitCode = error.code;
-          } else {
-            exitCode = 1;
-          }
-          signal = String(error.signal || "");
-          timedOut =
-            Boolean(error.killed) ||
-            signal === "SIGTERM" ||
-            signal === "SIGKILL" ||
-            /timed out/i.test(String(error.message || ""));
-        }
+    const stdoutState = { text: "", truncated: false };
+    const stderrState = { text: "", truncated: false };
+    let spawnError = null;
+    let timedOut = false;
+    let timeoutHandle = null;
 
-        resolve({
-          tool: LOCAL_SHELL_TOOL_NAME,
-          environment: "extension-host",
-          command,
-          cwd,
-          shell: shell.executable,
-          timeout_seconds: timeoutSeconds,
-          max_output_chars: maxOutputChars,
-          duration_ms: elapsedMs,
-          exit_code: exitCode,
-          signal,
-          timed_out: timedOut,
-          stdout: stdoutTrunc.text,
-          stderr: stderrTrunc.text,
-          stdout_truncated: stdoutTrunc.truncated,
-          stderr_truncated: stderrTrunc.truncated
-        });
+    function clearTimer() {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = null;
       }
-    );
+    }
+
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // Ignore signal failures.
+      }
+      setTimeout(() => {
+        if (!child.killed) {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // Ignore signal failures.
+          }
+        }
+      }, 1000);
+    }, timeoutSeconds * 1000);
+
+    child.stdout.on("data", (chunk) => {
+      const text = chunk.toString("utf8");
+      appendLimitedText(stdoutState, text, maxOutputChars);
+      safeMirrorCall(mirror, "onStdout", { text });
+    });
+
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString("utf8");
+      appendLimitedText(stderrState, text, maxOutputChars);
+      safeMirrorCall(mirror, "onStderr", { text });
+    });
+
+    child.on("error", (err) => {
+      spawnError = err || new Error("Failed to spawn local shell command.");
+    });
+
+    child.on("close", (code, signalValue) => {
+      clearTimer();
+      const elapsedMs = Date.now() - startedAt;
+      const stdoutTrunc = asFinalText(stdoutState, maxOutputChars);
+      const stderrTrunc = asFinalText(stderrState, maxOutputChars);
+
+      let exitCode = typeof code === "number" ? code : 0;
+      let signal = String(signalValue || "");
+      if (spawnError) {
+        exitCode = typeof spawnError.code === "number" ? spawnError.code : 1;
+        signal = String(signal || spawnError.signal || "");
+      }
+
+      const result = {
+        tool: LOCAL_SHELL_TOOL_NAME,
+        environment: "extension-host",
+        command,
+        cwd,
+        shell: shell.executable,
+        timeout_seconds: timeoutSeconds,
+        max_output_chars: maxOutputChars,
+        duration_ms: elapsedMs,
+        exit_code: exitCode,
+        signal,
+        timed_out: timedOut,
+        stdout: stdoutTrunc.text,
+        stderr: stderrTrunc.text,
+        stdout_truncated: stdoutTrunc.truncated,
+        stderr_truncated: stderrTrunc.truncated
+      };
+
+      safeMirrorCall(mirror, "onExit", result);
+      resolve(result);
+    });
   });
 }
 

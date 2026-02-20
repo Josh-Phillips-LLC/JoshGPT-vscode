@@ -7,9 +7,12 @@ const {
 const { JoshGptSessionViewProvider } = require("./session-view-provider");
 const { McpHttpClient } = require("./mcp-client");
 const { runChatWithOptionalMcp } = require("./chat-runner");
+const { createLocalShellMirror } = require("./local-shell-mirror");
 
 const DEFAULT_MCP_BASE_URL = "http://127.0.0.1:8790/mcp";
 const DEFAULT_NATIVE_BASE_URL = "http://localhost:1234";
+const DEFAULT_LOCAL_SHELL_TERMINAL_NAME = "JoshGPT Local Shell";
+let runtimeLocalShellMirror = null;
 
 function getConfig() {
   const cfg = vscode.workspace.getConfiguration("joshgpt");
@@ -19,6 +22,12 @@ function getConfig() {
     String(cfg.get("nativeBaseUrl") || inferNativeBaseUrl(baseUrl) || DEFAULT_NATIVE_BASE_URL)
   );
   const chatEndpointMode = String(cfg.get("chatEndpointMode") || "openai-compat").trim();
+  const localShellMirrorEnabled = Boolean(cfg.get("localShell.mirrorTerminalEnabled") ?? true);
+  const localShellMirrorTerminalName =
+    String(cfg.get("localShell.mirrorTerminalName") || DEFAULT_LOCAL_SHELL_TERMINAL_NAME).trim() ||
+    DEFAULT_LOCAL_SHELL_TERMINAL_NAME;
+  const localShellMirrorReveal = Boolean(cfg.get("localShell.mirrorTerminalReveal") ?? true);
+
   return {
     baseUrl,
     nativeBaseUrl,
@@ -46,6 +55,30 @@ function getConfig() {
       cfg.get("localShell.defaultMaxOutputChars") || 12000
     ),
     localShellMaxOutputChars: Number(cfg.get("localShell.maxOutputChars") || 50000),
+    localShellMirrorTerminalEnabled: localShellMirrorEnabled,
+    localShellMirrorTerminalName: localShellMirrorTerminalName,
+    localShellMirrorTerminalReveal: localShellMirrorReveal,
+    localShellMirror:
+      localShellMirrorEnabled && runtimeLocalShellMirror
+        ? {
+            onStart: (event) => {
+              runtimeLocalShellMirror.onStart({
+                ...event,
+                terminal_name: localShellMirrorTerminalName,
+                reveal: localShellMirrorReveal
+              });
+            },
+            onStdout: (event) => {
+              runtimeLocalShellMirror.onStdout(event);
+            },
+            onStderr: (event) => {
+              runtimeLocalShellMirror.onStderr(event);
+            },
+            onExit: (event) => {
+              runtimeLocalShellMirror.onExit(event);
+            }
+          }
+        : null,
     workspaceRoot:
       vscode.workspace.workspaceFolders &&
       vscode.workspace.workspaceFolders.length > 0
@@ -130,6 +163,9 @@ async function askModel(output) {
   output.appendLine(
     `[joshgpt] local_shell=${cfg.localShellEnabled ? "enabled" : "disabled"}`
   );
+  output.appendLine(
+    `[joshgpt] local_shell_terminal_mirror=${cfg.localShellMirrorTerminalEnabled ? "enabled" : "disabled"} name="${cfg.localShellMirrorTerminalName}"`
+  );
 
   const { text } = await runChatWithOptionalMcp({
     config: cfg,
@@ -176,6 +212,15 @@ async function mcpStatus(output) {
 function activate(context) {
   const output = vscode.window.createOutputChannel("JoshGPT");
   output.appendLine("[joshgpt] extension activated");
+  runtimeLocalShellMirror = createLocalShellMirror({ output });
+  context.subscriptions.push({
+    dispose: () => {
+      if (runtimeLocalShellMirror) {
+        runtimeLocalShellMirror.dispose();
+        runtimeLocalShellMirror = null;
+      }
+    }
+  });
   const sessionProvider = new JoshGptSessionViewProvider(context, output, getConfig);
 
   context.subscriptions.push(

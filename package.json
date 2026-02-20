@@ -2,7 +2,7 @@
   "name": "joshgpt",
   "displayName": "JoshGPT",
   "description": "Minimal JoshGPT VS Code extension template with LM Studio support, local shell tooling, and optional MCP integrations.",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "publisher": "josh-phillips-llc",
   "license": "Apache-2.0",
   "repository": {
@@ -170,6 +170,21 @@
           "default": 50000,
           "minimum": 256,
           "description": "Maximum output truncation cap per stream for local shell tool calls."
+        },
+        "joshgpt.localShell.mirrorTerminalEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Mirror local shell tool execution to a dedicated VS Code terminal in real time."
+        },
+        "joshgpt.localShell.mirrorTerminalName": {
+          "type": "string",
+          "default": "JoshGPT Local Shell",
+          "description": "Name of the terminal used for local shell mirror mode."
+        },
+        "joshgpt.localShell.mirrorTerminalReveal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reveal the mirrored local shell terminal whenever a local shell tool call starts."
         }
       }
     }

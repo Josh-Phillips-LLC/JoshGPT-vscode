@@ -333,7 +333,8 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
             defaultTimeoutSeconds: config.localShellDefaultTimeoutSeconds,
             maxTimeoutSeconds: config.localShellMaxTimeoutSeconds,
             defaultMaxOutputChars: config.localShellDefaultMaxOutputChars,
-            maxOutputCharsCap: config.localShellMaxOutputChars
+            maxOutputCharsCap: config.localShellMaxOutputChars,
+            mirror: config.localShellMirror || null
           });
           toolResultText = JSON.stringify(localResult, null, 2);
           addTrace(
