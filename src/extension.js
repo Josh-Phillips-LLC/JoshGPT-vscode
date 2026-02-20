@@ -1,25 +1,89 @@
 const vscode = require("vscode");
 const {
+  inferNativeBaseUrl,
   normalizeBaseUrl,
   listModels: listModelsRequest
 } = require("./lmstudio-client");
 const { JoshGptSessionViewProvider } = require("./session-view-provider");
 const { McpHttpClient } = require("./mcp-client");
 const { runChatWithOptionalMcp } = require("./chat-runner");
+const { createLocalShellMirror } = require("./local-shell-mirror");
+
+const DEFAULT_MCP_BASE_URL = "http://127.0.0.1:8790/mcp";
+const DEFAULT_NATIVE_BASE_URL = "http://localhost:1234";
+const DEFAULT_LOCAL_SHELL_TERMINAL_NAME = "JoshGPT Local Shell";
+let runtimeLocalShellMirror = null;
 
 function getConfig() {
   const cfg = vscode.workspace.getConfiguration("joshgpt");
+  const rootCfg = vscode.workspace.getConfiguration();
+  const baseUrl = normalizeBaseUrl(cfg.get("baseUrl"));
+  const nativeBaseUrl = normalizeBaseUrl(
+    String(cfg.get("nativeBaseUrl") || inferNativeBaseUrl(baseUrl) || DEFAULT_NATIVE_BASE_URL)
+  );
+  const chatEndpointMode = String(cfg.get("chatEndpointMode") || "openai-compat").trim();
+  const localShellMirrorEnabled = Boolean(cfg.get("localShell.mirrorTerminalEnabled") ?? true);
+  const localShellMirrorTerminalName =
+    String(cfg.get("localShell.mirrorTerminalName") || DEFAULT_LOCAL_SHELL_TERMINAL_NAME).trim() ||
+    DEFAULT_LOCAL_SHELL_TERMINAL_NAME;
+  const localShellMirrorReveal = Boolean(cfg.get("localShell.mirrorTerminalReveal") ?? true);
+
   return {
-    baseUrl: normalizeBaseUrl(cfg.get("baseUrl")),
+    baseUrl,
+    nativeBaseUrl,
+    chatEndpointMode:
+      chatEndpointMode === "lmstudio-native-stream"
+        ? "lmstudio-native-stream"
+        : "openai-compat",
     model: String(cfg.get("model") || "").trim(),
     apiKey: String(cfg.get("apiKey") || "").trim(),
     systemPrompt: String(cfg.get("systemPrompt") || "").trim(),
     temperature: Number(cfg.get("temperature") || 0.2),
     maxTokens: Number(cfg.get("maxTokens") || 512),
-    mcpEnabled: Boolean(cfg.get("mcp.enabled") ?? true),
-    mcpBaseUrl: normalizeBaseUrl(cfg.get("mcp.baseUrl")),
-    mcpTimeoutMs: Number(cfg.get("mcp.timeoutMs") || 15000),
-    mcpMaxToolRounds: Number(cfg.get("mcp.maxToolRounds") || 4)
+    mcpEnabled: Boolean(rootCfg.get("joshgpt.mcp.enabled") ?? true),
+    mcpBaseUrl: normalizeBaseUrl(
+      String(rootCfg.get("joshgpt.mcp.baseUrl") || DEFAULT_MCP_BASE_URL)
+    ),
+    mcpTimeoutMs: Number(rootCfg.get("joshgpt.mcp.timeoutMs") || 15000),
+    mcpMaxToolRounds: Number(rootCfg.get("joshgpt.mcp.maxToolRounds") || 4),
+    localShellEnabled: Boolean(cfg.get("localShell.enabled") ?? true),
+    localShellDefaultTimeoutSeconds: Number(
+      cfg.get("localShell.defaultTimeoutSeconds") || 30
+    ),
+    localShellMaxTimeoutSeconds: Number(cfg.get("localShell.maxTimeoutSeconds") || 300),
+    localShellDefaultMaxOutputChars: Number(
+      cfg.get("localShell.defaultMaxOutputChars") || 12000
+    ),
+    localShellMaxOutputChars: Number(cfg.get("localShell.maxOutputChars") || 50000),
+    localShellMirrorTerminalEnabled: localShellMirrorEnabled,
+    localShellMirrorTerminalName: localShellMirrorTerminalName,
+    localShellMirrorTerminalReveal: localShellMirrorReveal,
+    localShellMirror:
+      localShellMirrorEnabled && runtimeLocalShellMirror
+        ? {
+            onStart: (event) => {
+              runtimeLocalShellMirror.onStart({
+                ...event,
+                terminal_name: localShellMirrorTerminalName,
+                reveal: localShellMirrorReveal
+              });
+            },
+            onStdout: (event) => {
+              runtimeLocalShellMirror.onStdout(event);
+            },
+            onStderr: (event) => {
+              runtimeLocalShellMirror.onStderr(event);
+            },
+            onExit: (event) => {
+              runtimeLocalShellMirror.onExit(event);
+            }
+          }
+        : null,
+    workspaceRoot:
+      vscode.workspace.workspaceFolders &&
+      vscode.workspace.workspaceFolders.length > 0
+        ? vscode.workspace.workspaceFolders[0].uri.fsPath
+        : process.cwd()
   };
 }
 
@@ -83,10 +147,24 @@ async function askModel(output) {
   }
   modelMessages.push({ role: "user", content: userPrompt });
 
-  output.appendLine(`[joshgpt] completion request -> ${cfg.baseUrl}/chat/completions`);
+  if (cfg.chatEndpointMode === "lmstudio-native-stream") {
+    output.appendLine(`[joshgpt] stream request -> ${cfg.nativeBaseUrl}/api/v1/chat`);
+  } else {
+    output.appendLine(`[joshgpt] completion request -> ${cfg.baseUrl}/chat/completions`);
+  }
   output.appendLine(`[joshgpt] model=${cfg.model}`);
+  output.appendLine(`[joshgpt] mode=${cfg.chatEndpointMode}`);
+  if (cfg.chatEndpointMode === "lmstudio-native-stream") {
+    output.appendLine(`[joshgpt] native stream endpoint -> ${cfg.nativeBaseUrl}/api/v1/chat`);
+  }
   output.appendLine(
     `[joshgpt] mcp=${cfg.mcpEnabled ? "enabled" : "disabled"} base=${cfg.mcpBaseUrl || "<unset>"}`
+  );
+  output.appendLine(
+    `[joshgpt] local_shell=${cfg.localShellEnabled ? "enabled" : "disabled"}`
+  );
+  output.appendLine(
+    `[joshgpt] local_shell_terminal_mirror=${cfg.localShellMirrorTerminalEnabled ? "enabled" : "disabled"} name="${cfg.localShellMirrorTerminalName}"`
   );
 
   const { text } = await runChatWithOptionalMcp({
@@ -134,6 +212,15 @@ async function mcpStatus(output) {
 function activate(context) {
   const output = vscode.window.createOutputChannel("JoshGPT");
   output.appendLine("[joshgpt] extension activated");
+  runtimeLocalShellMirror = createLocalShellMirror({ output });
+  context.subscriptions.push({
+    dispose: () => {
+      if (runtimeLocalShellMirror) {
+        runtimeLocalShellMirror.dispose();
+        runtimeLocalShellMirror = null;
+      }
+    }
+  });
   const sessionProvider = new JoshGptSessionViewProvider(context, output, getConfig);
 
   context.subscriptions.push(
