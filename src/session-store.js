@@ -1,5 +1,7 @@
 "use strict";
 
+const { randomBytes } = require("crypto");
+
 const STORE_KEY = "joshgpt.sessions.v1";
 const DEFAULT_TITLE = "New Session";
 
@@ -8,7 +10,7 @@ function nowIso() {
 }
 
 function makeId(prefix) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}-${Date.now()}-${randomBytes(6).toString("hex")}`;
 }
 
 function deriveTitle(text) {
