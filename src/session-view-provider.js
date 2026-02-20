@@ -87,6 +87,15 @@ class JoshGptSessionViewProvider {
       return;
     }
 
+    if (type === "clearTrace") {
+      const sessionId = String(message.sessionId || "");
+      if (sessionId) {
+        await this.store.clearTraceEvents(sessionId);
+        await this._postState();
+      }
+      return;
+    }
+
     if (type === "sendPrompt") {
       const prompt = String((message && message.prompt) || "").trim();
       if (!prompt) {
@@ -136,13 +145,14 @@ class JoshGptSessionViewProvider {
         `[joshgpt] session completion request model=${cfg.model} messages=${modelMessages.length}`
       );
 
-      const { text } = await runChatWithOptionalMcp({
+      const { text, trace } = await runChatWithOptionalMcp({
         config: cfg,
         messages: modelMessages,
         output: this.output
       });
 
       await this.store.appendMessage(activeSession.id, "assistant", text);
+      await this.store.appendTraceEvents(activeSession.id, trace);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await this.store.appendMessage(
@@ -150,6 +160,14 @@ class JoshGptSessionViewProvider {
         "assistant",
         `Error: ${msg}`
       );
+      await this.store.appendTraceEvents(activeSession.id, [
+        {
+          timestamp: new Date().toISOString(),
+          type: "error",
+          summary: "Prompt execution failed.",
+          details: msg
+        }
+      ]);
       this.output.appendLine(`[joshgpt] session completion error: ${msg}`);
       vscode.window.showErrorMessage(msg);
     } finally {
@@ -247,7 +265,7 @@ class JoshGptSessionViewProvider {
     }
     .chat {
       display: grid;
-      grid-template-rows: auto 1fr auto;
+      grid-template-rows: auto 1fr auto auto;
       min-width: 0;
     }
     .chat-header {
@@ -310,6 +328,36 @@ class JoshGptSessionViewProvider {
       gap: 8px;
       align-items: end;
     }
+    .trace {
+      border-top: 1px solid var(--vscode-panel-border);
+      max-height: 28vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 100px;
+    }
+    .trace-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 8px;
+      font-size: 11px;
+      opacity: 0.9;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .trace-content {
+      margin: 0;
+      padding: 8px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 11px;
+      line-height: 1.4;
+      opacity: 0.95;
+    }
     .composer textarea {
       min-height: 56px;
       max-height: 180px;
@@ -364,6 +412,13 @@ class JoshGptSessionViewProvider {
         <textarea id="promptInput" placeholder="Ask JoshGPT..."></textarea>
         <button id="sendBtn">Send</button>
       </div>
+      <div class="trace">
+        <div class="trace-header">
+          <span>Trace</span>
+          <button id="clearTraceBtn" class="secondary">Clear</button>
+        </div>
+        <pre id="traceContent" class="trace-content"></pre>
+      </div>
     </section>
   </div>
 
@@ -374,9 +429,11 @@ class JoshGptSessionViewProvider {
     const listEl = document.getElementById("sessionList");
     const titleEl = document.getElementById("chatTitle");
     const messagesEl = document.getElementById("messages");
+    const traceEl = document.getElementById("traceContent");
     const sendBtn = document.getElementById("sendBtn");
     const promptInput = document.getElementById("promptInput");
     const deleteBtn = document.getElementById("deleteSessionBtn");
+    const clearTraceBtn = document.getElementById("clearTraceBtn");
 
     function activeSession() {
       return state.sessions.find((s) => s.id === state.activeSessionId) || null;
@@ -433,17 +490,21 @@ class JoshGptSessionViewProvider {
         messagesEl.appendChild(empty);
         titleEl.textContent = "No active session";
         deleteBtn.disabled = true;
+        traceEl.textContent = "No active session.";
+        clearTraceBtn.disabled = true;
         return;
       }
 
       titleEl.textContent = active.title || "Untitled Session";
       deleteBtn.disabled = false;
+      clearTraceBtn.disabled = false;
 
       if (!active.messages.length) {
         const empty = document.createElement("div");
         empty.className = "empty";
         empty.textContent = "No messages yet.";
         messagesEl.appendChild(empty);
+        renderTrace(active);
         return;
       }
 
@@ -464,6 +525,29 @@ class JoshGptSessionViewProvider {
         messagesEl.appendChild(wrapper);
       }
       messagesEl.scrollTop = messagesEl.scrollHeight;
+      renderTrace(active);
+    }
+
+    function formatTraceLine(event) {
+      const ts = formatTime(event.timestamp || "");
+      const type = String(event.type || "event").toUpperCase();
+      const summary = String(event.summary || "");
+      const details = String(event.details || "");
+      const header = "[" + ts + "] " + type + ": " + summary;
+      if (!details) {
+        return header;
+      }
+      return header + "\\n" + details;
+    }
+
+    function renderTrace(active) {
+      const traceEvents = Array.isArray(active.traceEvents) ? active.traceEvents : [];
+      if (!traceEvents.length) {
+        traceEl.textContent = "No trace events for this session yet.";
+        return;
+      }
+      traceEl.textContent = traceEvents.map(formatTraceLine).join("\\n\\n");
+      traceEl.scrollTop = traceEl.scrollHeight;
     }
 
     function renderBusyState() {
@@ -486,6 +570,12 @@ class JoshGptSessionViewProvider {
       const active = activeSession();
       if (!active) return;
       vscode.postMessage({ type: "deleteSession", sessionId: active.id });
+    });
+
+    clearTraceBtn.addEventListener("click", () => {
+      const active = activeSession();
+      if (!active) return;
+      vscode.postMessage({ type: "clearTrace", sessionId: active.id });
     });
 
     function sendPrompt() {

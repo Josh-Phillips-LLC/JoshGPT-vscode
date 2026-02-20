@@ -1,5 +1,6 @@
 const vscode = require("vscode");
 const {
+  inferNativeBaseUrl,
   normalizeBaseUrl,
   listModels: listModelsRequest
 } = require("./lmstudio-client");
@@ -7,19 +8,35 @@ const { JoshGptSessionViewProvider } = require("./session-view-provider");
 const { McpHttpClient } = require("./mcp-client");
 const { runChatWithOptionalMcp } = require("./chat-runner");
 
+const DEFAULT_MCP_BASE_URL = "http://127.0.0.1:8790/mcp";
+const DEFAULT_NATIVE_BASE_URL = "http://localhost:1234";
+
 function getConfig() {
   const cfg = vscode.workspace.getConfiguration("joshgpt");
+  const rootCfg = vscode.workspace.getConfiguration();
+  const baseUrl = normalizeBaseUrl(cfg.get("baseUrl"));
+  const nativeBaseUrl = normalizeBaseUrl(
+    String(cfg.get("nativeBaseUrl") || inferNativeBaseUrl(baseUrl) || DEFAULT_NATIVE_BASE_URL)
+  );
+  const chatEndpointMode = String(cfg.get("chatEndpointMode") || "openai-compat").trim();
   return {
-    baseUrl: normalizeBaseUrl(cfg.get("baseUrl")),
+    baseUrl,
+    nativeBaseUrl,
+    chatEndpointMode:
+      chatEndpointMode === "lmstudio-native-stream"
+        ? "lmstudio-native-stream"
+        : "openai-compat",
     model: String(cfg.get("model") || "").trim(),
     apiKey: String(cfg.get("apiKey") || "").trim(),
     systemPrompt: String(cfg.get("systemPrompt") || "").trim(),
     temperature: Number(cfg.get("temperature") || 0.2),
     maxTokens: Number(cfg.get("maxTokens") || 512),
-    mcpEnabled: Boolean(cfg.get("mcp.enabled") ?? true),
-    mcpBaseUrl: normalizeBaseUrl(cfg.get("mcp.baseUrl")),
-    mcpTimeoutMs: Number(cfg.get("mcp.timeoutMs") || 15000),
-    mcpMaxToolRounds: Number(cfg.get("mcp.maxToolRounds") || 4)
+    mcpEnabled: Boolean(rootCfg.get("joshgpt.mcp.enabled") ?? true),
+    mcpBaseUrl: normalizeBaseUrl(
+      String(rootCfg.get("joshgpt.mcp.baseUrl") || DEFAULT_MCP_BASE_URL)
+    ),
+    mcpTimeoutMs: Number(rootCfg.get("joshgpt.mcp.timeoutMs") || 15000),
+    mcpMaxToolRounds: Number(rootCfg.get("joshgpt.mcp.maxToolRounds") || 4)
   };
 }
 
@@ -83,8 +100,16 @@ async function askModel(output) {
   }
   modelMessages.push({ role: "user", content: userPrompt });
 
-  output.appendLine(`[joshgpt] completion request -> ${cfg.baseUrl}/chat/completions`);
+  if (cfg.chatEndpointMode === "lmstudio-native-stream") {
+    output.appendLine(`[joshgpt] stream request -> ${cfg.nativeBaseUrl}/api/v1/chat`);
+  } else {
+    output.appendLine(`[joshgpt] completion request -> ${cfg.baseUrl}/chat/completions`);
+  }
   output.appendLine(`[joshgpt] model=${cfg.model}`);
+  output.appendLine(`[joshgpt] mode=${cfg.chatEndpointMode}`);
+  if (cfg.chatEndpointMode === "lmstudio-native-stream") {
+    output.appendLine(`[joshgpt] native stream endpoint -> ${cfg.nativeBaseUrl}/api/v1/chat`);
+  }
   output.appendLine(
     `[joshgpt] mcp=${cfg.mcpEnabled ? "enabled" : "disabled"} base=${cfg.mcpBaseUrl || "<unset>"}`
   );

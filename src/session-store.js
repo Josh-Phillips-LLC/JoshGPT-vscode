@@ -28,9 +28,21 @@ function normalizeMessage(raw) {
   };
 }
 
+function normalizeTraceEvent(raw) {
+  return {
+    timestamp: String((raw && raw.timestamp) || nowIso()),
+    type: String((raw && raw.type) || "event"),
+    summary: String((raw && raw.summary) || ""),
+    details: String((raw && raw.details) || "")
+  };
+}
+
 function normalizeSession(raw) {
   const messages = Array.isArray(raw && raw.messages)
     ? raw.messages.map(normalizeMessage)
+    : [];
+  const traceEvents = Array.isArray(raw && raw.traceEvents)
+    ? raw.traceEvents.map(normalizeTraceEvent)
     : [];
   const createdAt = String((raw && raw.createdAt) || nowIso());
   const updatedAt = String((raw && raw.updatedAt) || createdAt);
@@ -40,7 +52,8 @@ function normalizeSession(raw) {
     title: String((raw && raw.title) || DEFAULT_TITLE),
     createdAt,
     updatedAt,
-    messages
+    messages,
+    traceEvents
   };
 }
 
@@ -107,7 +120,8 @@ class SessionStore {
       title: String(title || DEFAULT_TITLE),
       createdAt: timestamp,
       updatedAt: timestamp,
-      messages: []
+      messages: [],
+      traceEvents: []
     };
 
     this.state.sessions.unshift(session);
@@ -169,6 +183,37 @@ class SessionStore {
 
     await this._persist();
     return message;
+  }
+
+  async appendTraceEvents(sessionId, events) {
+    const session = this.getSessionById(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+
+    const normalized = Array.isArray(events)
+      ? events.map(normalizeTraceEvent)
+      : [];
+    if (!normalized.length) {
+      return [];
+    }
+
+    session.traceEvents.push(...normalized);
+    session.updatedAt = nowIso();
+    this.state.activeSessionId = session.id;
+    await this._persist();
+    return normalized;
+  }
+
+  async clearTraceEvents(sessionId) {
+    const session = this.getSessionById(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    session.traceEvents = [];
+    session.updatedAt = nowIso();
+    this.state.activeSessionId = session.id;
+    await this._persist();
   }
 }
 

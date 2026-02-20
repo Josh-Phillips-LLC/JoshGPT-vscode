@@ -1,14 +1,20 @@
 # JoshGPT VS Code Extension Template (Spike)
 
-This starter provides a minimal `JoshGPT` VS Code extension that calls LM Studio through its OpenAI-compatible REST API and can use MCP tools during chat turns.
+This starter provides a minimal `JoshGPT` VS Code extension that supports:
+- OpenAI-compatible LM Studio REST API for chat and MCP tool-calling.
+- Native LM Studio streaming REST API for rich trace events (including `reasoning.*` when emitted by the model).
 
 ## What It Does
 
 - Adds a JoshGPT activity-bar view with persistent chat sessions
+- Includes a Trace pane for model/tool execution events per session
 - Adds command `JoshGPT: List Models`
 - Adds command `JoshGPT: Ask Model`
 - Adds command `JoshGPT: New Session`
 - Adds command `JoshGPT: MCP Status`
+- Supports endpoint modes:
+  - `openai-compat` (default)
+  - `lmstudio-native-stream`
 - Uses OpenAI-compatible endpoints:
   - `GET /v1/models`
   - `POST /v1/chat/completions`
@@ -42,6 +48,8 @@ This starter provides a minimal `JoshGPT` VS Code extension that calls LM Studio
 - `Send` in the sidebar sends full in-session message history + `joshgpt.systemPrompt`.
 - `Cmd+Enter` (or `Ctrl+Enter`) sends the current prompt.
 - If no workspace folder is open, selecting a model still works (writes to user settings scope).
+- Trace pane shows execution events, not hidden model chain-of-thought tokens.
+- In native stream mode, trace includes raw stream event names and payload snippets.
 
 ## Package Test
 
@@ -55,7 +63,7 @@ Install into an isolated extensions directory:
 
 ```bash
 code --extensions-dir /tmp/vscode-lmstudio-ext-test \
-  --install-extension ./joshgpt-0.0.1.vsix --force
+  --install-extension ./joshgpt-0.0.6.vsix --force
 ```
 
 Verify:
@@ -69,6 +77,11 @@ code --extensions-dir /tmp/vscode-lmstudio-ext-test --list-extensions | grep jos
 - `joshgpt.baseUrl`
   - Host default: `http://localhost:1234/v1`
   - Devcontainer default recommendation: `http://host.docker.internal:1234/v1`
+- `joshgpt.chatEndpointMode`
+  - `openai-compat`: OpenAI-style endpoint with MCP tool calling.
+  - `lmstudio-native-stream`: Native `/api/v1/chat` streaming endpoint.
+- `joshgpt.nativeBaseUrl`
+  - Host default: `http://localhost:1234`
 - `joshgpt.model`
 - `joshgpt.apiKey`
   - LM Studio commonly accepts any bearer string (for example `lm-studio`)
@@ -81,12 +94,18 @@ code --extensions-dir /tmp/vscode-lmstudio-ext-test --list-extensions | grep jos
 - `joshgpt.mcp.timeoutMs`
 - `joshgpt.mcp.maxToolRounds`
 
-## MCP Tool Calling
+## MCP Tool Calling (OpenAI-Compatible Mode)
 
 - When `joshgpt.mcp.enabled=true`, JoshGPT requests MCP tool metadata via `tools/list`.
 - Tool schemas are passed to LM Studio in `chat/completions` as OpenAI function tools.
 - If the model returns tool calls, JoshGPT executes them through MCP `tools/call` and feeds results back into the model loop.
 - The loop stops when the model returns a normal assistant response or `joshgpt.mcp.maxToolRounds` is reached.
+
+## Native Streaming Mode
+
+- Set `joshgpt.chatEndpointMode=lmstudio-native-stream`.
+- JoshGPT calls `POST /api/v1/chat` with `stream: true` at `joshgpt.nativeBaseUrl`.
+- Trace pane records stream events and payload snippets. If your model emits reasoning events, you will see entries like `reasoning.start`, `reasoning.delta`, and `reasoning.end`.
 
 ### MCP Prerequisite
 
@@ -112,6 +131,14 @@ Run the direct client-module self-test used by the extension:
 ```bash
 LMSTUDIO_BASE_URL=http://localhost:1234/v1 \
 npm run test:client
+```
+
+Run native streaming self-test:
+
+```bash
+LMSTUDIO_BASE_URL=http://localhost:1234/v1 \
+LMSTUDIO_NATIVE_BASE_URL=http://localhost:1234 \
+npm run test:native
 ```
 
 For container-based testing, use:

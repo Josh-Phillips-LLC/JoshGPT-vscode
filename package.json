@@ -1,13 +1,13 @@
 {
   "name": "joshgpt",
   "displayName": "JoshGPT",
-  "description": "Minimal JoshGPT VS Code extension template backed by LM Studio's OpenAI-compatible endpoint.",
-  "version": "0.0.2",
-  "publisher": "context-engineering-template",
+  "description": "Minimal JoshGPT VS Code extension template with OpenAI-compatible and LM Studio native streaming paths.",
+  "version": "0.0.6",
+  "publisher": "josh-phillips-llc",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Josh-Phillips-LLC/Context-Engineering.git"
+    "url": "https://github.com/Josh-Phillips-LLC/JoshGPT-vscode.git"
   },
   "engines": {
     "vscode": "^1.90.0"
@@ -69,15 +69,6 @@
         }
       ]
     },
-    "menus": {
-      "view/title": [
-        {
-          "command": "joshgpt.newSession",
-          "when": "view == joshgpt.sessions",
-          "group": "navigation@1"
-        }
-      ]
-    },
     "configuration": {
       "title": "JoshGPT",
       "properties": {
@@ -85,6 +76,20 @@
           "type": "string",
           "default": "http://localhost:1234/v1",
           "description": "Base URL for the LM Studio OpenAI-compatible endpoint."
+        },
+        "joshgpt.chatEndpointMode": {
+          "type": "string",
+          "default": "openai-compat",
+          "enum": [
+            "openai-compat",
+            "lmstudio-native-stream"
+          ],
+          "description": "Chat transport mode. 'openai-compat' supports MCP tool-calling; 'lmstudio-native-stream' streams native LM Studio events (including reasoning.* when supported)."
+        },
+        "joshgpt.nativeBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:1234",
+          "description": "Base URL for LM Studio native REST endpoint (used with joshgpt.chatEndpointMode=lmstudio-native-stream)."
         },
         "joshgpt.model": {
           "type": "string",
@@ -143,6 +148,7 @@
   "scripts": {
     "test:smoke": "bash ./scripts/smoke-test.sh",
     "test:client": "node ./scripts/client-self-test.js",
+    "test:native": "node ./scripts/native-stream-self-test.js",
     "test:mcp": "node ./scripts/mcp-self-test.js",
     "package:vsix": "npx @vscode/vsce package --no-dependencies"
   },
