@@ -1,0 +1,121 @@
+{
+  "name": "joshgpt",
+  "displayName": "JoshGPT",
+  "description": "Minimal JoshGPT VS Code extension template backed by LM Studio's OpenAI-compatible endpoint.",
+  "version": "0.0.1",
+  "publisher": "context-engineering-template",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Josh-Phillips-LLC/Context-Engineering.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "files": [
+    "src/**",
+    "scripts/**",
+    "icons/**",
+    ".vscode/launch.json",
+    "LICENSE",
+    "README.md",
+    "package.json"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:joshgpt.sessions",
+    "onCommand:joshgpt.newSession",
+    "onCommand:joshgpt.listModels",
+    "onCommand:joshgpt.askModel"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "joshgpt.listModels",
+        "title": "JoshGPT: List Models"
+      },
+      {
+        "command": "joshgpt.askModel",
+        "title": "JoshGPT: Ask Model"
+      },
+      {
+        "command": "joshgpt.newSession",
+        "title": "JoshGPT: New Session"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "joshgpt",
+          "title": "JoshGPT",
+          "icon": "icons/joshgpt.svg"
+        }
+      ]
+    },
+    "views": {
+      "joshgpt": [
+        {
+          "type": "webview",
+          "id": "joshgpt.sessions",
+          "name": "Sessions"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "joshgpt.newSession",
+          "when": "view == joshgpt.sessions",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "JoshGPT",
+      "properties": {
+        "joshgpt.baseUrl": {
+          "type": "string",
+          "default": "http://localhost:1234/v1",
+          "description": "Base URL for the LM Studio OpenAI-compatible endpoint."
+        },
+        "joshgpt.model": {
+          "type": "string",
+          "default": "oss20b-local",
+          "description": "Model ID served by LM Studio for JoshGPT requests."
+        },
+        "joshgpt.apiKey": {
+          "type": "string",
+          "default": "lm-studio",
+          "description": "Bearer token sent to LM Studio endpoint."
+        },
+        "joshgpt.systemPrompt": {
+          "type": "string",
+          "default": "You are JoshGPT, a concise coding assistant.",
+          "description": "Optional system prompt prepended to each JoshGPT request."
+        },
+        "joshgpt.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature for chat completions."
+        },
+        "joshgpt.maxTokens": {
+          "type": "number",
+          "default": 512,
+          "minimum": 1,
+          "description": "Maximum completion tokens."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test:smoke": "bash ./scripts/smoke-test.sh",
+    "test:client": "node ./scripts/client-self-test.js",
+    "package:vsix": "npx @vscode/vsce package --no-dependencies"
+  },
+  "devDependencies": {}
+}
