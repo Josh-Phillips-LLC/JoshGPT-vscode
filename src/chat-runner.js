@@ -5,6 +5,16 @@ const {
   createNativeStreamingChat
 } = require("./lmstudio-client");
 const { McpHttpClient } = require("./mcp-client");
+const {
+  LOCAL_SHELL_TOOL_NAME,
+  getLocalShellOpenAiTool,
+  runLocalShellToolCall
+} = require("./local-shell-tool");
+
+const MCP_EXECUTION_TOOL_NAMES = new Set([
+  "run_host_command",
+  "run_container_command"
+]);
 
 function stringifyToolResult(result) {
   if (result && typeof result.structuredContent !== "undefined") {
@@ -43,9 +53,10 @@ function parseToolArguments(raw) {
   }
 }
 
-function asOpenAiTools(mcpTools) {
+function asOpenAiTools(mcpTools, excludedToolNames = new Set()) {
   return (Array.isArray(mcpTools) ? mcpTools : [])
     .filter((tool) => tool && tool.name && tool.inputSchema)
+    .filter((tool) => !excludedToolNames.has(String(tool.name)))
     .map((tool) => ({
       type: "function",
       function: {
@@ -152,12 +163,15 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
     });
   }
 
+  const localShellEnabled = Boolean(config.localShellEnabled);
+  const localTools = localShellEnabled ? [getLocalShellOpenAiTool()] : [];
+
   let mcpClient = null;
   let openAiTools = [];
   let mcpEnabled = Boolean(config.mcpEnabled);
   addTrace(
     "start",
-    `Prompt execution started (mcp=${mcpEnabled ? "enabled" : "disabled"})`
+    `Prompt execution started (mcp=${mcpEnabled ? "enabled" : "disabled"}, local_shell=${localShellEnabled ? "enabled" : "disabled"})`
   );
 
   if (mcpEnabled) {
@@ -168,14 +182,17 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
         output
       });
       const mcpTools = await mcpClient.listTools();
-      openAiTools = asOpenAiTools(mcpTools);
+      const mcpOpenAiTools = asOpenAiTools(mcpTools, MCP_EXECUTION_TOOL_NAMES);
+      openAiTools = [...localTools, ...mcpOpenAiTools];
       if (!openAiTools.length) {
         addTrace("mcp", "MCP connected but no tools were returned.");
         mcpEnabled = false;
+      } else if (!mcpOpenAiTools.length && localShellEnabled) {
+        addTrace("mcp", "MCP connected; execution tools excluded; local shell tool active.");
       } else {
         addTrace(
           "mcp",
-          `MCP tools loaded (${openAiTools.length}).`,
+          `Tools loaded (${openAiTools.length}).`,
           openAiTools.map((tool) => tool.function.name).join(", ")
         );
       }
@@ -187,9 +204,18 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       addTrace("mcp", "MCP disabled for this turn.", msg);
       mcpEnabled = false;
     }
+  } else if (localShellEnabled) {
+    openAiTools = [...localTools];
+    addTrace("tool", "MCP disabled; local shell tool is active.");
+  }
+
+  if (mcpEnabled && localShellEnabled && !openAiTools.length) {
+    openAiTools = [...localTools];
   }
 
   const workingMessages = Array.isArray(messages) ? [...messages] : [];
+  const toolChoiceEnabled = Array.isArray(openAiTools) && openAiTools.length > 0;
+  let usedToolsInTurn = false;
   const maxRounds = Number.isFinite(config.mcpMaxToolRounds)
     ? Math.max(1, config.mcpMaxToolRounds)
     : 4;
@@ -207,8 +233,8 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       messages: workingMessages,
       temperature: config.temperature,
       maxTokens: config.maxTokens,
-      tools: mcpEnabled ? openAiTools : undefined,
-      toolChoice: mcpEnabled ? "auto" : undefined
+      tools: toolChoiceEnabled ? openAiTools : undefined,
+      toolChoice: toolChoiceEnabled ? "auto" : undefined
     });
 
     const toolCallCount = countToolCalls(response);
@@ -216,11 +242,11 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       "round",
       `Round ${round + 1}: model responded (tool_calls=${toolCallCount}).`
     );
-    if (!mcpEnabled || toolCallCount === 0) {
+    if (toolCallCount === 0) {
       addTrace("final", "Model returned final response without additional tool calls.");
       return {
         text: response.text,
-        usedTools: false,
+        usedTools: usedToolsInTurn,
         rounds: round + 1,
         trace
       };
@@ -240,6 +266,7 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
     addTrace("tool", `Round ${round + 1}: executing ${toolCallCount} tool call(s).`);
 
     for (const toolCall of response.toolCalls) {
+      usedToolsInTurn = true;
       const toolName = toolCall?.function?.name || "";
       const rawArgs = toolCall?.function?.arguments || "{}";
       const args = parseToolArguments(rawArgs);
@@ -250,18 +277,43 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       );
 
       let toolResultText;
-      try {
-        const result = await mcpClient.callTool(toolName, args);
-        toolResultText = stringifyToolResult(result);
-        addTrace(
-          "tool",
-          `Tool result: ${toolName || "<unknown>"}`,
-          toolResultText.slice(0, 1200)
-        );
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        toolResultText = `MCP tool call failed: ${msg}`;
-        addTrace("tool-error", `Tool failed: ${toolName || "<unknown>"}`, msg);
+      if (toolName === LOCAL_SHELL_TOOL_NAME) {
+        try {
+          const localResult = await runLocalShellToolCall(args, {
+            workspaceRoot: config.workspaceRoot,
+            defaultTimeoutSeconds: config.localShellDefaultTimeoutSeconds,
+            maxTimeoutSeconds: config.localShellMaxTimeoutSeconds,
+            defaultMaxOutputChars: config.localShellDefaultMaxOutputChars,
+            maxOutputCharsCap: config.localShellMaxOutputChars
+          });
+          toolResultText = JSON.stringify(localResult, null, 2);
+          addTrace(
+            "tool",
+            `Local shell result: ${toolName}`,
+            toolResultText.slice(0, 1200)
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          toolResultText = `Local shell tool failed: ${msg}`;
+          addTrace("tool-error", `Local shell failed: ${toolName}`, msg);
+        }
+      } else {
+        try {
+          if (!mcpClient) {
+            throw new Error("MCP client unavailable for non-local tool.");
+          }
+          const result = await mcpClient.callTool(toolName, args);
+          toolResultText = stringifyToolResult(result);
+          addTrace(
+            "tool",
+            `Tool result: ${toolName || "<unknown>"}`,
+            toolResultText.slice(0, 1200)
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          toolResultText = `MCP tool call failed: ${msg}`;
+          addTrace("tool-error", `Tool failed: ${toolName || "<unknown>"}`, msg);
+        }
       }
 
       workingMessages.push({

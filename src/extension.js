@@ -36,7 +36,21 @@ function getConfig() {
       String(rootCfg.get("joshgpt.mcp.baseUrl") || DEFAULT_MCP_BASE_URL)
     ),
     mcpTimeoutMs: Number(rootCfg.get("joshgpt.mcp.timeoutMs") || 15000),
-    mcpMaxToolRounds: Number(rootCfg.get("joshgpt.mcp.maxToolRounds") || 4)
+    mcpMaxToolRounds: Number(rootCfg.get("joshgpt.mcp.maxToolRounds") || 4),
+    localShellEnabled: Boolean(cfg.get("localShell.enabled") ?? true),
+    localShellDefaultTimeoutSeconds: Number(
+      cfg.get("localShell.defaultTimeoutSeconds") || 30
+    ),
+    localShellMaxTimeoutSeconds: Number(cfg.get("localShell.maxTimeoutSeconds") || 300),
+    localShellDefaultMaxOutputChars: Number(
+      cfg.get("localShell.defaultMaxOutputChars") || 12000
+    ),
+    localShellMaxOutputChars: Number(cfg.get("localShell.maxOutputChars") || 50000),
+    workspaceRoot:
+      vscode.workspace.workspaceFolders &&
+      vscode.workspace.workspaceFolders.length > 0
+        ? vscode.workspace.workspaceFolders[0].uri.fsPath
+        : process.cwd()
   };
 }
 
@@ -112,6 +126,9 @@ async function askModel(output) {
   }
   output.appendLine(
     `[joshgpt] mcp=${cfg.mcpEnabled ? "enabled" : "disabled"} base=${cfg.mcpBaseUrl || "<unset>"}`
+  );
+  output.appendLine(
+    `[joshgpt] local_shell=${cfg.localShellEnabled ? "enabled" : "disabled"}`
   );
 
   const { text } = await runChatWithOptionalMcp({

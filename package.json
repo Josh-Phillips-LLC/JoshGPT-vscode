@@ -1,8 +1,8 @@
 {
   "name": "joshgpt",
   "displayName": "JoshGPT",
-  "description": "Minimal JoshGPT VS Code extension template with OpenAI-compatible and LM Studio native streaming paths.",
-  "version": "0.0.6",
+  "description": "Minimal JoshGPT VS Code extension template with LM Studio support, local shell tooling, and optional MCP integrations.",
+  "version": "0.0.7",
   "publisher": "josh-phillips-llc",
   "license": "Apache-2.0",
   "repository": {
@@ -141,6 +141,35 @@
           "minimum": 1,
           "maximum": 12,
           "description": "Maximum assistant tool-call rounds per prompt."
+        },
+        "joshgpt.localShell.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable extension-host local shell tool calling (run_local_shell_command)."
+        },
+        "joshgpt.localShell.defaultTimeoutSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "description": "Default timeout for local shell tool calls."
+        },
+        "joshgpt.localShell.maxTimeoutSeconds": {
+          "type": "number",
+          "default": 300,
+          "minimum": 1,
+          "description": "Maximum allowed timeout for local shell tool calls."
+        },
+        "joshgpt.localShell.defaultMaxOutputChars": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 256,
+          "description": "Default output truncation cap per stream for local shell tool calls."
+        },
+        "joshgpt.localShell.maxOutputChars": {
+          "type": "number",
+          "default": 50000,
+          "minimum": 256,
+          "description": "Maximum output truncation cap per stream for local shell tool calls."
         }
       }
     }
@@ -148,6 +177,7 @@
   "scripts": {
     "test:smoke": "bash ./scripts/smoke-test.sh",
     "test:client": "node ./scripts/client-self-test.js",
+    "test:local-shell": "node ./scripts/local-shell-self-test.js",
     "test:native": "node ./scripts/native-stream-self-test.js",
     "test:mcp": "node ./scripts/mcp-self-test.js",
     "package:vsix": "npx @vscode/vsce package --no-dependencies"
