@@ -1,6 +1,6 @@
 # JoshGPT VS Code Extension Template (Spike)
 
-This starter provides a minimal `JoshGPT` VS Code extension that calls LM Studio through its OpenAI-compatible REST API.
+This starter provides a minimal `JoshGPT` VS Code extension that calls LM Studio through its OpenAI-compatible REST API and can use MCP tools during chat turns.
 
 ## What It Does
 
@@ -8,6 +8,7 @@ This starter provides a minimal `JoshGPT` VS Code extension that calls LM Studio
 - Adds command `JoshGPT: List Models`
 - Adds command `JoshGPT: Ask Model`
 - Adds command `JoshGPT: New Session`
+- Adds command `JoshGPT: MCP Status`
 - Uses OpenAI-compatible endpoints:
   - `GET /v1/models`
   - `POST /v1/chat/completions`
@@ -19,6 +20,8 @@ This starter provides a minimal `JoshGPT` VS Code extension that calls LM Studio
 - `src/session-store.js` - persisted session state
 - `src/session-view-provider.js` - webview session UI
 - `src/lmstudio-client.js` - LM Studio API client
+- `src/mcp-client.js` - MCP HTTP client (streamable-http)
+- `src/chat-runner.js` - LM Studio + MCP tool-call loop
 - `scripts/smoke-test.sh` - endpoint smoke test (outside VS Code)
 
 ## Quick Start
@@ -29,6 +32,7 @@ This starter provides a minimal `JoshGPT` VS Code extension that calls LM Studio
 4. In the Extension Host:
    - Open the `JoshGPT` icon in the Activity Bar
    - Create or select a session, then chat in the sidebar
+   - Run `JoshGPT: MCP Status` to verify tool connectivity
    - Run `JoshGPT: List Models`
    - Run `JoshGPT: Ask Model`
 
@@ -71,6 +75,28 @@ code --extensions-dir /tmp/vscode-lmstudio-ext-test --list-extensions | grep jos
 - `joshgpt.systemPrompt`
 - `joshgpt.temperature`
 - `joshgpt.maxTokens`
+- `joshgpt.mcp.enabled`
+- `joshgpt.mcp.baseUrl`
+  - Recommended local default: `http://127.0.0.1:8790/mcp`
+- `joshgpt.mcp.timeoutMs`
+- `joshgpt.mcp.maxToolRounds`
+
+## MCP Tool Calling
+
+- When `joshgpt.mcp.enabled=true`, JoshGPT requests MCP tool metadata via `tools/list`.
+- Tool schemas are passed to LM Studio in `chat/completions` as OpenAI function tools.
+- If the model returns tool calls, JoshGPT executes them through MCP `tools/call` and feeds results back into the model loop.
+- The loop stops when the model returns a normal assistant response or `joshgpt.mcp.maxToolRounds` is reached.
+
+### MCP Prerequisite
+
+Run `JoshGPT-MCP` and expose it (example at `127.0.0.1:8790`):
+
+```bash
+cd /Users/josh/Projects/JoshGPT-MCP
+cp .env.example .env
+JOSHGPT_MCP_PUBLISH_PORT=8790 docker compose up -d
+```
 
 ## Smoke Test
 

@@ -2,7 +2,7 @@
   "name": "joshgpt",
   "displayName": "JoshGPT",
   "description": "Minimal JoshGPT VS Code extension template backed by LM Studio's OpenAI-compatible endpoint.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "context-engineering-template",
   "license": "Apache-2.0",
   "repository": {
@@ -28,7 +28,8 @@
     "onView:joshgpt.sessions",
     "onCommand:joshgpt.newSession",
     "onCommand:joshgpt.listModels",
-    "onCommand:joshgpt.askModel"
+    "onCommand:joshgpt.askModel",
+    "onCommand:joshgpt.mcpStatus"
   ],
   "main": "./src/extension.js",
   "contributes": {
@@ -44,6 +45,10 @@
       {
         "command": "joshgpt.newSession",
         "title": "JoshGPT: New Session"
+      },
+      {
+        "command": "joshgpt.mcpStatus",
+        "title": "JoshGPT: MCP Status"
       }
     ],
     "viewsContainers": {
@@ -108,6 +113,29 @@
           "default": 512,
           "minimum": 1,
           "description": "Maximum completion tokens."
+        },
+        "joshgpt.mcp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable MCP tool calling during JoshGPT completions."
+        },
+        "joshgpt.mcp.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8790/mcp",
+          "description": "JoshGPT MCP endpoint URL."
+        },
+        "joshgpt.mcp.timeoutMs": {
+          "type": "number",
+          "default": 15000,
+          "minimum": 1000,
+          "description": "MCP request timeout in milliseconds."
+        },
+        "joshgpt.mcp.maxToolRounds": {
+          "type": "number",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 12,
+          "description": "Maximum assistant tool-call rounds per prompt."
         }
       }
     }
@@ -115,6 +143,7 @@
   "scripts": {
     "test:smoke": "bash ./scripts/smoke-test.sh",
     "test:client": "node ./scripts/client-self-test.js",
+    "test:mcp": "node ./scripts/mcp-self-test.js",
     "package:vsix": "npx @vscode/vsce package --no-dependencies"
   },
   "devDependencies": {}

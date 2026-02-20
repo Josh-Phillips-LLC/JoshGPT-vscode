@@ -1,10 +1,11 @@
 const vscode = require("vscode");
 const {
   normalizeBaseUrl,
-  listModels: listModelsRequest,
-  createChatCompletion
+  listModels: listModelsRequest
 } = require("./lmstudio-client");
 const { JoshGptSessionViewProvider } = require("./session-view-provider");
+const { McpHttpClient } = require("./mcp-client");
+const { runChatWithOptionalMcp } = require("./chat-runner");
 
 function getConfig() {
   const cfg = vscode.workspace.getConfiguration("joshgpt");
@@ -14,7 +15,11 @@ function getConfig() {
     apiKey: String(cfg.get("apiKey") || "").trim(),
     systemPrompt: String(cfg.get("systemPrompt") || "").trim(),
     temperature: Number(cfg.get("temperature") || 0.2),
-    maxTokens: Number(cfg.get("maxTokens") || 512)
+    maxTokens: Number(cfg.get("maxTokens") || 512),
+    mcpEnabled: Boolean(cfg.get("mcp.enabled") ?? true),
+    mcpBaseUrl: normalizeBaseUrl(cfg.get("mcp.baseUrl")),
+    mcpTimeoutMs: Number(cfg.get("mcp.timeoutMs") || 15000),
+    mcpMaxToolRounds: Number(cfg.get("mcp.maxToolRounds") || 4)
   };
 }
 
@@ -72,20 +77,23 @@ async function askModel(output) {
     return;
   }
 
-  const payload = {
-    baseUrl: cfg.baseUrl,
-    apiKey: cfg.apiKey,
-    model: cfg.model,
-    systemPrompt: cfg.systemPrompt,
-    userPrompt,
-    temperature: cfg.temperature,
-    maxTokens: cfg.maxTokens
-  };
+  const modelMessages = [];
+  if (cfg.systemPrompt) {
+    modelMessages.push({ role: "system", content: cfg.systemPrompt });
+  }
+  modelMessages.push({ role: "user", content: userPrompt });
 
-  output.appendLine(`[joshgpt] POST ${cfg.baseUrl}/chat/completions`);
+  output.appendLine(`[joshgpt] completion request -> ${cfg.baseUrl}/chat/completions`);
   output.appendLine(`[joshgpt] model=${cfg.model}`);
+  output.appendLine(
+    `[joshgpt] mcp=${cfg.mcpEnabled ? "enabled" : "disabled"} base=${cfg.mcpBaseUrl || "<unset>"}`
+  );
 
-  const { text } = await createChatCompletion(payload);
+  const { text } = await runChatWithOptionalMcp({
+    config: cfg,
+    messages: modelMessages,
+    output
+  });
 
   output.appendLine("[joshgpt] response received");
   output.appendLine(text);
@@ -96,6 +104,31 @@ async function askModel(output) {
     content: text
   });
   await vscode.window.showTextDocument(doc, { preview: false });
+}
+
+async function mcpStatus(output) {
+  const cfg = getConfig();
+  if (!cfg.mcpEnabled) {
+    vscode.window.showInformationMessage("JoshGPT MCP is disabled in settings (joshgpt.mcp.enabled=false).");
+    return;
+  }
+  if (!cfg.mcpBaseUrl) {
+    throw new Error("joshgpt.mcp.baseUrl is empty.");
+  }
+
+  const client = new McpHttpClient({
+    baseUrl: cfg.mcpBaseUrl,
+    timeoutMs: cfg.mcpTimeoutMs,
+    output
+  });
+
+  const tools = await client.listTools();
+  const names = tools.map((t) => t && t.name).filter(Boolean);
+  output.appendLine(`[joshgpt] MCP tools: ${names.join(", ") || "<none>"}`);
+  output.show(true);
+  vscode.window.showInformationMessage(
+    `JoshGPT MCP connected: ${names.length} tool(s) at ${cfg.mcpBaseUrl}`
+  );
 }
 
 function activate(context) {
@@ -138,6 +171,18 @@ function activate(context) {
     vscode.commands.registerCommand("joshgpt.askModel", async () => {
       try {
         await askModel(output);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        output.appendLine(`[joshgpt] error: ${msg}`);
+        vscode.window.showErrorMessage(msg);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("joshgpt.mcpStatus", async () => {
+      try {
+        await mcpStatus(output);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         output.appendLine(`[joshgpt] error: ${msg}`);

@@ -39,7 +39,9 @@ async function createChatCompletion({
   systemPrompt,
   userPrompt,
   temperature,
-  maxTokens
+  maxTokens,
+  tools,
+  toolChoice
 }) {
   const normalizedBase = normalizeBaseUrl(baseUrl);
   const payloadMessages =
@@ -57,6 +59,10 @@ async function createChatCompletion({
     max_tokens: Number.isFinite(maxTokens) ? maxTokens : 512,
     stream: false
   };
+  if (Array.isArray(tools) && tools.length > 0) {
+    payload.tools = tools;
+    payload.tool_choice = toolChoice || "auto";
+  }
 
   const res = await fetch(`${normalizedBase}/chat/completions`, {
     method: "POST",
@@ -70,10 +76,16 @@ async function createChatCompletion({
   }
 
   const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content;
+  const message = data?.choices?.[0]?.message || {};
+  const content = message?.content;
+  const finishReason = data?.choices?.[0]?.finish_reason || "";
+  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
 
   return {
     data,
+    message,
+    finishReason,
+    toolCalls,
     text:
       typeof content === "string" && content.trim().length > 0
         ? content.trim()

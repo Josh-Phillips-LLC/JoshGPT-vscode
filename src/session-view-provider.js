@@ -1,8 +1,8 @@
 "use strict";
 
 const vscode = require("vscode");
-const { createChatCompletion } = require("./lmstudio-client");
 const { SessionStore } = require("./session-store");
+const { runChatWithOptionalMcp } = require("./chat-runner");
 
 function makeNonce() {
   const chars =
@@ -136,13 +136,10 @@ class JoshGptSessionViewProvider {
         `[joshgpt] session completion request model=${cfg.model} messages=${modelMessages.length}`
       );
 
-      const { text } = await createChatCompletion({
-        baseUrl: cfg.baseUrl,
-        apiKey: cfg.apiKey,
-        model: cfg.model,
+      const { text } = await runChatWithOptionalMcp({
+        config: cfg,
         messages: modelMessages,
-        temperature: cfg.temperature,
-        maxTokens: cfg.maxTokens
+        output: this.output
       });
 
       await this.store.appendMessage(activeSession.id, "assistant", text);
