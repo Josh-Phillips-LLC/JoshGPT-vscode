@@ -52,6 +52,7 @@ This starter provides a minimal `JoshGPT` VS Code extension that supports:
 - If no workspace folder is open, selecting a model still works (writes to user settings scope).
 - Trace pane shows execution events, not hidden model chain-of-thought tokens.
 - In native stream mode, trace includes raw stream event names and payload snippets.
+- Output channel logs tool calls with argument payloads (redacted/truncated for sensitive/large values).
 
 ## Package Test
 
@@ -65,7 +66,7 @@ Install into an isolated extensions directory:
 
 ```bash
 code --extensions-dir /tmp/vscode-lmstudio-ext-test \
-  --install-extension ./joshgpt-0.0.7.vsix --force
+  --install-extension ./joshgpt-0.0.8.vsix --force
 ```
 
 Verify:

@@ -2,7 +2,7 @@
   "name": "joshgpt",
   "displayName": "JoshGPT",
   "description": "Minimal JoshGPT VS Code extension template with LM Studio support, local shell tooling, and optional MCP integrations.",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "publisher": "josh-phillips-llc",
   "license": "Apache-2.0",
   "repository": {

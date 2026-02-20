@@ -53,6 +53,50 @@ function parseToolArguments(raw) {
   }
 }
 
+function redactForLog(value, keyName = "") {
+  const key = String(keyName || "").toLowerCase();
+  const sensitive =
+    key.includes("token") ||
+    key.includes("secret") ||
+    key.includes("password") ||
+    key.includes("authorization") ||
+    key.includes("api_key") ||
+    key.includes("private_key") ||
+    key.includes("cookie");
+
+  if (sensitive) {
+    return "<redacted>";
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => redactForLog(item, keyName));
+  }
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = redactForLog(v, k);
+    }
+    return out;
+  }
+  if (typeof value === "string") {
+    return value.length > 2000 ? `${value.slice(0, 2000)}...[truncated]` : value;
+  }
+  return value;
+}
+
+function formatArgsForLog(args, maxChars = 1200) {
+  try {
+    const safe = redactForLog(args);
+    const text = JSON.stringify(safe);
+    if (typeof text !== "string") {
+      return "{}";
+    }
+    return text.length > maxChars ? `${text.slice(0, maxChars)}...[truncated]` : text;
+  } catch {
+    return "<unserializable-args>";
+  }
+}
+
 function asOpenAiTools(mcpTools, excludedToolNames = new Set()) {
   return (Array.isArray(mcpTools) ? mcpTools : [])
     .filter((tool) => tool && tool.name && tool.inputSchema)
@@ -270,6 +314,11 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       const toolName = toolCall?.function?.name || "";
       const rawArgs = toolCall?.function?.arguments || "{}";
       const args = parseToolArguments(rawArgs);
+      if (output) {
+        output.appendLine(
+          `[joshgpt] tool call -> ${toolName || "<unknown>"} args=${formatArgsForLog(args)}`
+        );
+      }
       addTrace(
         "tool",
         `Calling tool: ${toolName || "<unknown>"}`,
