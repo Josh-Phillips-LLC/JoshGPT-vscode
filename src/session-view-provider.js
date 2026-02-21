@@ -4,6 +4,30 @@ const vscode = require("vscode");
 const { SessionStore } = require("./session-store");
 const { runChatWithOptionalMcp } = require("./chat-runner");
 
+const SETTINGS_EXTENSION_ID = "josh-phillips-llc.joshgpt";
+const SETTINGS_FIELDS = [
+  { key: "baseUrl", type: "string" },
+  { key: "nativeBaseUrl", type: "string" },
+  { key: "chatEndpointMode", type: "enum", enum: ["openai-compat", "lmstudio-native-stream"] },
+  { key: "model", type: "string" },
+  { key: "apiKey", type: "string" },
+  { key: "systemPrompt", type: "string" },
+  { key: "temperature", type: "number", min: 0, max: 2 },
+  { key: "maxTokens", type: "number", min: 1 },
+  { key: "mcp.enabled", type: "boolean" },
+  { key: "mcp.baseUrl", type: "string" },
+  { key: "mcp.timeoutMs", type: "number", min: 1000 },
+  { key: "mcp.maxToolRounds", type: "number", min: 1, max: 12 },
+  { key: "localShell.enabled", type: "boolean" },
+  { key: "localShell.defaultTimeoutSeconds", type: "number", min: 1 },
+  { key: "localShell.maxTimeoutSeconds", type: "number", min: 1 },
+  { key: "localShell.defaultMaxOutputChars", type: "number", min: 256 },
+  { key: "localShell.maxOutputChars", type: "number", min: 256 },
+  { key: "localShell.mirrorTerminalEnabled", type: "boolean" },
+  { key: "localShell.mirrorTerminalName", type: "string" },
+  { key: "localShell.mirrorTerminalReveal", type: "boolean" }
+];
+
 function makeNonce() {
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -12,6 +36,35 @@ function makeNonce() {
     value += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return value;
+}
+
+function _coerceBoolean(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const lowered = String(value || "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(lowered)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(lowered)) {
+    return false;
+  }
+  return Boolean(value);
+}
+
+function _clampNumber(value, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid number value: ${value}`);
+  }
+  let result = parsed;
+  if (typeof min === "number") {
+    result = Math.max(result, min);
+  }
+  if (typeof max === "number") {
+    result = Math.min(result, max);
+  }
+  return result;
 }
 
 class JoshGptSessionViewProvider {
@@ -53,6 +106,60 @@ class JoshGptSessionViewProvider {
   async createSessionFromCommand() {
     await this.store.createSession();
     await this._postState();
+  }
+
+  _settingsConfig() {
+    return vscode.workspace.getConfiguration("joshgpt");
+  }
+
+  _hasWorkspace() {
+    return Boolean((vscode.workspace.workspaceFolders || []).length > 0);
+  }
+
+  _serializeSettings() {
+    const cfg = this._settingsConfig();
+    const values = {};
+    for (const field of SETTINGS_FIELDS) {
+      values[field.key] = cfg.get(field.key);
+    }
+    return {
+      fields: SETTINGS_FIELDS,
+      values,
+      signature: JSON.stringify(values),
+      hasWorkspace: this._hasWorkspace()
+    };
+  }
+
+  async _saveSettings(rawValues, rawScope) {
+    const target = rawScope === "workspace" && this._hasWorkspace()
+      ? vscode.ConfigurationTarget.Workspace
+      : vscode.ConfigurationTarget.Global;
+    const cfg = this._settingsConfig();
+
+    for (const field of SETTINGS_FIELDS) {
+      if (!Object.prototype.hasOwnProperty.call(rawValues || {}, field.key)) {
+        continue;
+      }
+
+      let nextValue = rawValues[field.key];
+      if (field.type === "number") {
+        nextValue = _clampNumber(nextValue, field.min, field.max);
+      } else if (field.type === "boolean") {
+        nextValue = _coerceBoolean(nextValue);
+      } else if (field.type === "enum") {
+        const normalized = String(nextValue || "").trim();
+        if (!field.enum.includes(normalized)) {
+          throw new Error(
+            `Invalid value for ${field.key}. Expected one of: ${field.enum.join(", ")}`
+          );
+        }
+        nextValue = normalized;
+      } else {
+        nextValue = String(nextValue || "").trim();
+      }
+
+      await cfg.update(field.key, nextValue, target);
+    }
   }
 
   async _handleMessage(message) {
@@ -102,6 +209,28 @@ class JoshGptSessionViewProvider {
         return;
       }
       await this._sendPrompt(prompt);
+      return;
+    }
+
+    if (type === "reloadSettings") {
+      await this._postState();
+      return;
+    }
+
+    if (type === "saveSettings") {
+      const values = (message && message.values) || {};
+      const scope = String((message && message.scope) || "user").trim().toLowerCase();
+      await this._saveSettings(values, scope);
+      await this._postState();
+      return;
+    }
+
+    if (type === "openSettingsUi") {
+      await vscode.commands.executeCommand(
+        "workbench.action.openSettings",
+        `@ext:${SETTINGS_EXTENSION_ID}`
+      );
+      return;
     }
   }
 
@@ -185,7 +314,8 @@ class JoshGptSessionViewProvider {
       payload: {
         sessions: this.store.getSessions(),
         activeSessionId: this.store.getActiveSessionId(),
-        busy: this.busy
+        busy: this.busy,
+        settings: this._serializeSettings()
       }
     });
   }
@@ -215,8 +345,14 @@ class JoshGptSessionViewProvider {
     }
     .layout {
       display: grid;
-      grid-template-columns: 34% 66%;
+      grid-template-columns: minmax(180px, 28%) 1fr;
       height: 100vh;
+    }
+    .layout.sessions-collapsed {
+      grid-template-columns: 0 1fr;
+    }
+    .layout.sessions-collapsed .sessions {
+      display: none;
     }
     .sessions {
       border-right: 1px solid var(--vscode-panel-border);
@@ -265,7 +401,7 @@ class JoshGptSessionViewProvider {
     }
     .chat {
       display: grid;
-      grid-template-rows: auto 1fr auto auto;
+      grid-template-rows: auto auto 1fr auto;
       min-width: 0;
     }
     .chat-header {
@@ -275,6 +411,11 @@ class JoshGptSessionViewProvider {
       gap: 8px;
       padding: 8px;
       border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .chat-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
     .chat-title {
       font-size: 13px;
@@ -320,6 +461,36 @@ class JoshGptSessionViewProvider {
       font-size: 12px;
       line-height: 1.45;
     }
+    details.message-trace {
+      margin-top: 8px;
+      border-top: 1px dashed var(--vscode-panel-border);
+      padding-top: 6px;
+    }
+    details.message-trace > summary {
+      cursor: pointer;
+      font-size: 11px;
+      opacity: 0.9;
+      list-style: none;
+      user-select: none;
+    }
+    details.message-trace > summary::-webkit-details-marker {
+      display: none;
+    }
+    details.message-trace > summary::before {
+      content: "▸ ";
+    }
+    details.message-trace[open] > summary::before {
+      content: "▾ ";
+    }
+    .message-trace-content {
+      margin: 6px 0 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 11px;
+      line-height: 1.4;
+      opacity: 0.95;
+    }
     .composer {
       border-top: 1px solid var(--vscode-panel-border);
       padding: 8px;
@@ -328,35 +499,77 @@ class JoshGptSessionViewProvider {
       gap: 8px;
       align-items: end;
     }
-    .trace {
-      border-top: 1px solid var(--vscode-panel-border);
-      max-height: 28vh;
-      display: grid;
-      grid-template-rows: auto 1fr;
-      min-height: 100px;
+    .settings {
+      border-bottom: 1px solid var(--vscode-panel-border);
+      margin: 0;
     }
-    .trace-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
+    .settings[open] > summary {
+      border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .settings > summary {
       padding: 6px 8px;
       font-size: 11px;
       opacity: 0.9;
       text-transform: uppercase;
       letter-spacing: 0.04em;
+      cursor: pointer;
+      user-select: none;
+      list-style: none;
+    }
+    .settings > summary::-webkit-details-marker {
+      display: none;
+    }
+    .settings > summary::before {
+      content: "▸ ";
+    }
+    .settings[open] > summary::before {
+      content: "▾ ";
+    }
+    .settings-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
       border-bottom: 1px solid var(--vscode-panel-border);
     }
-    .trace-content {
+    .settings-toolbar select {
+      padding: 2px 4px;
+      font: inherit;
+      color: inherit;
+      background: var(--vscode-dropdown-background);
+      border: 1px solid var(--vscode-dropdown-border);
+      border-radius: 4px;
+    }
+    .settings-note {
       margin: 0;
-      padding: 8px;
-      overflow: auto;
+      padding: 6px 8px;
+      font-size: 11px;
+      opacity: 0.85;
+      border-bottom: 1px solid var(--vscode-panel-border);
       white-space: pre-wrap;
       word-break: break-word;
+      max-height: 72px;
+      overflow: auto;
+    }
+    .settings-editor {
+      width: 100%;
+      height: 140px;
+      min-height: 100px;
+      max-height: 24vh;
+      border: none;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      padding: 8px;
+      resize: none;
       font-family: var(--vscode-editor-font-family);
       font-size: 11px;
-      line-height: 1.4;
-      opacity: 0.95;
+      color: inherit;
+      background: var(--vscode-editor-background);
+      box-sizing: border-box;
+    }
+    .settings-status {
+      padding: 6px 8px;
+      font-size: 11px;
+      opacity: 0.9;
     }
     .composer textarea {
       min-height: 56px;
@@ -405,35 +618,63 @@ class JoshGptSessionViewProvider {
     <section class="chat">
       <div class="chat-header">
         <div id="chatTitle" class="chat-title">No active session</div>
-        <button id="deleteSessionBtn" class="secondary">Delete</button>
+        <div class="chat-actions">
+          <button id="toggleSessionsBtn" class="secondary">Show Sessions</button>
+          <button id="deleteSessionBtn" class="secondary">Delete</button>
+        </div>
       </div>
+      <details id="settingsPanel" class="settings">
+        <summary>Settings</summary>
+        <div class="settings-toolbar">
+          <label for="settingsScope">Save scope</label>
+          <select id="settingsScope">
+            <option value="user">User</option>
+            <option value="workspace">Workspace</option>
+          </select>
+          <button id="reloadSettingsBtn" class="secondary">Reload</button>
+          <button id="saveSettingsBtn">Save</button>
+          <button id="openSettingsBtn" class="secondary">Open VS Code Settings</button>
+        </div>
+        <pre id="settingsNote" class="settings-note"></pre>
+        <textarea id="settingsJson" class="settings-editor" spellcheck="false"></textarea>
+        <div id="settingsStatus" class="settings-status"></div>
+      </details>
       <div id="messages" class="messages"></div>
       <div class="composer">
         <textarea id="promptInput" placeholder="Ask JoshGPT..."></textarea>
         <button id="sendBtn">Send</button>
-      </div>
-      <div class="trace">
-        <div class="trace-header">
-          <span>Trace</span>
-          <button id="clearTraceBtn" class="secondary">Clear</button>
-        </div>
-        <pre id="traceContent" class="trace-content"></pre>
       </div>
     </section>
   </div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    let state = { sessions: [], activeSessionId: null, busy: false };
+    let state = {
+      sessions: [],
+      activeSessionId: null,
+      busy: false,
+      settings: { fields: [], values: {}, signature: "", hasWorkspace: false }
+    };
+    const uiState = {
+      sessionsCollapsed: true
+    };
+    let settingsDirty = false;
 
+    const layoutEl = document.querySelector(".layout");
     const listEl = document.getElementById("sessionList");
     const titleEl = document.getElementById("chatTitle");
     const messagesEl = document.getElementById("messages");
-    const traceEl = document.getElementById("traceContent");
     const sendBtn = document.getElementById("sendBtn");
     const promptInput = document.getElementById("promptInput");
+    const toggleSessionsBtn = document.getElementById("toggleSessionsBtn");
     const deleteBtn = document.getElementById("deleteSessionBtn");
-    const clearTraceBtn = document.getElementById("clearTraceBtn");
+    const settingsScopeEl = document.getElementById("settingsScope");
+    const settingsJsonEl = document.getElementById("settingsJson");
+    const settingsNoteEl = document.getElementById("settingsNote");
+    const settingsStatusEl = document.getElementById("settingsStatus");
+    const reloadSettingsBtn = document.getElementById("reloadSettingsBtn");
+    const saveSettingsBtn = document.getElementById("saveSettingsBtn");
+    const openSettingsBtn = document.getElementById("openSettingsBtn");
 
     function activeSession() {
       return state.sessions.find((s) => s.id === state.activeSessionId) || null;
@@ -490,23 +731,22 @@ class JoshGptSessionViewProvider {
         messagesEl.appendChild(empty);
         titleEl.textContent = "No active session";
         deleteBtn.disabled = true;
-        traceEl.textContent = "No active session.";
-        clearTraceBtn.disabled = true;
         return;
       }
 
       titleEl.textContent = active.title || "Untitled Session";
       deleteBtn.disabled = false;
-      clearTraceBtn.disabled = false;
 
       if (!active.messages.length) {
         const empty = document.createElement("div");
         empty.className = "empty";
         empty.textContent = "No messages yet.";
         messagesEl.appendChild(empty);
-        renderTrace(active);
         return;
       }
+
+      const traceRuns = buildTraceRuns(active);
+      let assistantIndex = 0;
 
       for (const message of active.messages) {
         const wrapper = document.createElement("div");
@@ -522,10 +762,18 @@ class JoshGptSessionViewProvider {
 
         wrapper.appendChild(header);
         wrapper.appendChild(content);
+
+        if (message.role === "assistant") {
+          const traceForAssistant = assistantIndex < traceRuns.length ? traceRuns[assistantIndex] : [];
+          assistantIndex += 1;
+          if (traceForAssistant.length) {
+            wrapper.appendChild(renderInlineTrace(traceForAssistant));
+          }
+        }
+
         messagesEl.appendChild(wrapper);
       }
       messagesEl.scrollTop = messagesEl.scrollHeight;
-      renderTrace(active);
     }
 
     function formatTraceLine(event) {
@@ -540,14 +788,48 @@ class JoshGptSessionViewProvider {
       return header + "\\n" + details;
     }
 
-    function renderTrace(active) {
+    function buildTraceRuns(active) {
       const traceEvents = Array.isArray(active.traceEvents) ? active.traceEvents : [];
       if (!traceEvents.length) {
-        traceEl.textContent = "No trace events for this session yet.";
-        return;
+        return [];
       }
-      traceEl.textContent = traceEvents.map(formatTraceLine).join("\\n\\n");
-      traceEl.scrollTop = traceEl.scrollHeight;
+
+      const runs = [];
+      let current = [];
+      for (const event of traceEvents) {
+        if (String(event.type || "") === "start" && current.length) {
+          runs.push(current);
+          current = [event];
+          continue;
+        }
+        current.push(event);
+      }
+      if (current.length) {
+        runs.push(current);
+      }
+      return runs;
+    }
+
+    function renderInlineTrace(traceEvents) {
+      const details = document.createElement("details");
+      details.className = "message-trace";
+
+      const summary = document.createElement("summary");
+      summary.textContent = "Trace (" + traceEvents.length + " events)";
+
+      const content = document.createElement("pre");
+      content.className = "message-trace-content";
+      content.textContent = traceEvents.map(formatTraceLine).join("\\n\\n");
+
+      details.appendChild(summary);
+      details.appendChild(content);
+      return details;
+    }
+
+    function renderLayout() {
+      const collapsed = Boolean(uiState.sessionsCollapsed);
+      layoutEl.classList.toggle("sessions-collapsed", collapsed);
+      toggleSessionsBtn.textContent = collapsed ? "Show Sessions" : "Hide Sessions";
     }
 
     function renderBusyState() {
@@ -556,10 +838,36 @@ class JoshGptSessionViewProvider {
       promptInput.disabled = state.busy;
     }
 
-    function render() {
+    function renderSettings(force) {
+      const settings = state.settings || {};
+      const values = settings.values || {};
+      const fields = Array.isArray(settings.fields) ? settings.fields : [];
+      const supportedKeys = fields.map((f) => f.key).join(", ");
+      settingsNoteEl.textContent = supportedKeys
+        ? "Editable keys: " + supportedKeys
+        : "No editable settings metadata received.";
+
+      const workspaceAvailable = Boolean(settings.hasWorkspace);
+      const chosenScope = settingsScopeEl.value || "user";
+      if (!workspaceAvailable && chosenScope === "workspace") {
+        settingsScopeEl.value = "user";
+      }
+      settingsScopeEl.querySelector('option[value=\"workspace\"]').disabled = !workspaceAvailable;
+
+      if (force || !settingsDirty) {
+        settingsJsonEl.value = JSON.stringify(values, null, 2);
+        settingsDirty = false;
+      }
+      settingsStatusEl.textContent =
+        "Workspace scope available: " + (workspaceAvailable ? "yes" : "no");
+    }
+
+    function render(forceSettings) {
+      renderLayout();
       renderSessions();
       renderMessages();
       renderBusyState();
+      renderSettings(forceSettings);
     }
 
     document.getElementById("newSessionBtn").addEventListener("click", () => {
@@ -572,10 +880,43 @@ class JoshGptSessionViewProvider {
       vscode.postMessage({ type: "deleteSession", sessionId: active.id });
     });
 
-    clearTraceBtn.addEventListener("click", () => {
-      const active = activeSession();
-      if (!active) return;
-      vscode.postMessage({ type: "clearTrace", sessionId: active.id });
+    toggleSessionsBtn.addEventListener("click", () => {
+      uiState.sessionsCollapsed = !uiState.sessionsCollapsed;
+      render(false);
+    });
+
+    settingsJsonEl.addEventListener("input", () => {
+      settingsDirty = true;
+      settingsStatusEl.textContent = "Settings edited but not saved.";
+    });
+
+    reloadSettingsBtn.addEventListener("click", () => {
+      settingsDirty = false;
+      settingsStatusEl.textContent = "Reloading settings...";
+      vscode.postMessage({ type: "reloadSettings" });
+    });
+
+    saveSettingsBtn.addEventListener("click", () => {
+      let parsed;
+      try {
+        parsed = JSON.parse(settingsJsonEl.value || "{}");
+      } catch (err) {
+        settingsStatusEl.textContent =
+          "Invalid JSON: " + (err instanceof Error ? err.message : String(err));
+        return;
+      }
+
+      settingsStatusEl.textContent = "Saving settings...";
+      settingsDirty = false;
+      vscode.postMessage({
+        type: "saveSettings",
+        scope: settingsScopeEl.value || "user",
+        values: parsed
+      });
+    });
+
+    openSettingsBtn.addEventListener("click", () => {
+      vscode.postMessage({ type: "openSettingsUi" });
     });
 
     function sendPrompt() {
@@ -599,8 +940,12 @@ class JoshGptSessionViewProvider {
       if (!msg || msg.type !== "state") {
         return;
       }
-      state = msg.payload || state;
-      render();
+      const nextState = msg.payload || state;
+      const currentSig = state && state.settings ? state.settings.signature : "";
+      const nextSig = nextState && nextState.settings ? nextState.settings.signature : "";
+      const forceSettings = currentSig !== nextSig;
+      state = nextState;
+      render(forceSettings);
     });
 
     vscode.postMessage({ type: "ready" });
