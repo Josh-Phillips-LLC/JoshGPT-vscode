@@ -345,8 +345,14 @@ class JoshGptSessionViewProvider {
     }
     .layout {
       display: grid;
-      grid-template-columns: 34% 66%;
+      grid-template-columns: minmax(180px, 28%) 1fr;
       height: 100vh;
+    }
+    .layout.sessions-collapsed {
+      grid-template-columns: 0 1fr;
+    }
+    .layout.sessions-collapsed .sessions {
+      display: none;
     }
     .sessions {
       border-right: 1px solid var(--vscode-panel-border);
@@ -614,7 +620,7 @@ class JoshGptSessionViewProvider {
       <div class="chat-header">
         <div id="chatTitle" class="chat-title">No active session</div>
         <div class="chat-actions">
-          <button id="clearTraceBtn" class="secondary">Clear Trace</button>
+          <button id="toggleSessionsBtn" class="secondary">Show Sessions</button>
           <button id="deleteSessionBtn" class="secondary">Delete</button>
         </div>
       </div>
@@ -650,15 +656,19 @@ class JoshGptSessionViewProvider {
       busy: false,
       settings: { fields: [], values: {}, signature: "", hasWorkspace: false }
     };
+    const uiState = {
+      sessionsCollapsed: true
+    };
     let settingsDirty = false;
 
+    const layoutEl = document.querySelector(".layout");
     const listEl = document.getElementById("sessionList");
     const titleEl = document.getElementById("chatTitle");
     const messagesEl = document.getElementById("messages");
     const sendBtn = document.getElementById("sendBtn");
     const promptInput = document.getElementById("promptInput");
+    const toggleSessionsBtn = document.getElementById("toggleSessionsBtn");
     const deleteBtn = document.getElementById("deleteSessionBtn");
-    const clearTraceBtn = document.getElementById("clearTraceBtn");
     const settingsScopeEl = document.getElementById("settingsScope");
     const settingsJsonEl = document.getElementById("settingsJson");
     const settingsNoteEl = document.getElementById("settingsNote");
@@ -722,13 +732,11 @@ class JoshGptSessionViewProvider {
         messagesEl.appendChild(empty);
         titleEl.textContent = "No active session";
         deleteBtn.disabled = true;
-        clearTraceBtn.disabled = true;
         return;
       }
 
       titleEl.textContent = active.title || "Untitled Session";
       deleteBtn.disabled = false;
-      clearTraceBtn.disabled = !Array.isArray(active.traceEvents) || active.traceEvents.length === 0;
 
       if (!active.messages.length) {
         const empty = document.createElement("div");
@@ -819,6 +827,12 @@ class JoshGptSessionViewProvider {
       return details;
     }
 
+    function renderLayout() {
+      const collapsed = Boolean(uiState.sessionsCollapsed);
+      layoutEl.classList.toggle("sessions-collapsed", collapsed);
+      toggleSessionsBtn.textContent = collapsed ? "Show Sessions" : "Hide Sessions";
+    }
+
     function renderBusyState() {
       sendBtn.disabled = state.busy;
       sendBtn.textContent = state.busy ? "Sending..." : "Send";
@@ -850,6 +864,7 @@ class JoshGptSessionViewProvider {
     }
 
     function render(forceSettings) {
+      renderLayout();
       renderSessions();
       renderMessages();
       renderBusyState();
@@ -866,10 +881,9 @@ class JoshGptSessionViewProvider {
       vscode.postMessage({ type: "deleteSession", sessionId: active.id });
     });
 
-    clearTraceBtn.addEventListener("click", () => {
-      const active = activeSession();
-      if (!active) return;
-      vscode.postMessage({ type: "clearTrace", sessionId: active.id });
+    toggleSessionsBtn.addEventListener("click", () => {
+      uiState.sessionsCollapsed = !uiState.sessionsCollapsed;
+      render(false);
     });
 
     settingsJsonEl.addEventListener("input", () => {

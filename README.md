@@ -9,6 +9,7 @@ This starter provides a minimal `JoshGPT` VS Code extension that supports:
 - Adds a JoshGPT activity-bar view with persistent chat sessions
 - Includes inline, collapsible per-response trace blocks for model/tool execution events
 - Includes a top-of-panel collapsible Settings section for editing `joshgpt.*` configuration
+- Sessions list can be toggled from the chat header and defaults to collapsed to maximize chat width
 - Adds command `JoshGPT: List Models`
 - Adds command `JoshGPT: Ask Model`
 - Adds command `JoshGPT: New Session`
