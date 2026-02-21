@@ -659,7 +659,6 @@ class JoshGptSessionViewProvider {
     const promptInput = document.getElementById("promptInput");
     const deleteBtn = document.getElementById("deleteSessionBtn");
     const clearTraceBtn = document.getElementById("clearTraceBtn");
-    const settingsPanelEl = document.getElementById("settingsPanel");
     const settingsScopeEl = document.getElementById("settingsScope");
     const settingsJsonEl = document.getElementById("settingsJson");
     const settingsNoteEl = document.getElementById("settingsNote");
