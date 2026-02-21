@@ -4,6 +4,30 @@ const vscode = require("vscode");
 const { SessionStore } = require("./session-store");
 const { runChatWithOptionalMcp } = require("./chat-runner");
 
+const SETTINGS_EXTENSION_ID = "josh-phillips-llc.joshgpt";
+const SETTINGS_FIELDS = [
+  { key: "baseUrl", type: "string" },
+  { key: "nativeBaseUrl", type: "string" },
+  { key: "chatEndpointMode", type: "enum", enum: ["openai-compat", "lmstudio-native-stream"] },
+  { key: "model", type: "string" },
+  { key: "apiKey", type: "string" },
+  { key: "systemPrompt", type: "string" },
+  { key: "temperature", type: "number", min: 0, max: 2 },
+  { key: "maxTokens", type: "number", min: 1 },
+  { key: "mcp.enabled", type: "boolean" },
+  { key: "mcp.baseUrl", type: "string" },
+  { key: "mcp.timeoutMs", type: "number", min: 1000 },
+  { key: "mcp.maxToolRounds", type: "number", min: 1, max: 12 },
+  { key: "localShell.enabled", type: "boolean" },
+  { key: "localShell.defaultTimeoutSeconds", type: "number", min: 1 },
+  { key: "localShell.maxTimeoutSeconds", type: "number", min: 1 },
+  { key: "localShell.defaultMaxOutputChars", type: "number", min: 256 },
+  { key: "localShell.maxOutputChars", type: "number", min: 256 },
+  { key: "localShell.mirrorTerminalEnabled", type: "boolean" },
+  { key: "localShell.mirrorTerminalName", type: "string" },
+  { key: "localShell.mirrorTerminalReveal", type: "boolean" }
+];
+
 function makeNonce() {
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -12,6 +36,35 @@ function makeNonce() {
     value += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return value;
+}
+
+function _coerceBoolean(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const lowered = String(value || "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(lowered)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(lowered)) {
+    return false;
+  }
+  return Boolean(value);
+}
+
+function _clampNumber(value, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid number value: ${value}`);
+  }
+  let result = parsed;
+  if (typeof min === "number") {
+    result = Math.max(result, min);
+  }
+  if (typeof max === "number") {
+    result = Math.min(result, max);
+  }
+  return result;
 }
 
 class JoshGptSessionViewProvider {
@@ -53,6 +106,60 @@ class JoshGptSessionViewProvider {
   async createSessionFromCommand() {
     await this.store.createSession();
     await this._postState();
+  }
+
+  _settingsConfig() {
+    return vscode.workspace.getConfiguration("joshgpt");
+  }
+
+  _hasWorkspace() {
+    return Boolean((vscode.workspace.workspaceFolders || []).length > 0);
+  }
+
+  _serializeSettings() {
+    const cfg = this._settingsConfig();
+    const values = {};
+    for (const field of SETTINGS_FIELDS) {
+      values[field.key] = cfg.get(field.key);
+    }
+    return {
+      fields: SETTINGS_FIELDS,
+      values,
+      signature: JSON.stringify(values),
+      hasWorkspace: this._hasWorkspace()
+    };
+  }
+
+  async _saveSettings(rawValues, rawScope) {
+    const target = rawScope === "workspace" && this._hasWorkspace()
+      ? vscode.ConfigurationTarget.Workspace
+      : vscode.ConfigurationTarget.Global;
+    const cfg = this._settingsConfig();
+
+    for (const field of SETTINGS_FIELDS) {
+      if (!Object.prototype.hasOwnProperty.call(rawValues || {}, field.key)) {
+        continue;
+      }
+
+      let nextValue = rawValues[field.key];
+      if (field.type === "number") {
+        nextValue = _clampNumber(nextValue, field.min, field.max);
+      } else if (field.type === "boolean") {
+        nextValue = _coerceBoolean(nextValue);
+      } else if (field.type === "enum") {
+        const normalized = String(nextValue || "").trim();
+        if (!field.enum.includes(normalized)) {
+          throw new Error(
+            `Invalid value for ${field.key}. Expected one of: ${field.enum.join(", ")}`
+          );
+        }
+        nextValue = normalized;
+      } else {
+        nextValue = String(nextValue || "").trim();
+      }
+
+      await cfg.update(field.key, nextValue, target);
+    }
   }
 
   async _handleMessage(message) {
@@ -102,6 +209,28 @@ class JoshGptSessionViewProvider {
         return;
       }
       await this._sendPrompt(prompt);
+      return;
+    }
+
+    if (type === "reloadSettings") {
+      await this._postState();
+      return;
+    }
+
+    if (type === "saveSettings") {
+      const values = (message && message.values) || {};
+      const scope = String((message && message.scope) || "user").trim().toLowerCase();
+      await this._saveSettings(values, scope);
+      await this._postState();
+      return;
+    }
+
+    if (type === "openSettingsUi") {
+      await vscode.commands.executeCommand(
+        "workbench.action.openSettings",
+        `@ext:${SETTINGS_EXTENSION_ID}`
+      );
+      return;
     }
   }
 
@@ -185,7 +314,8 @@ class JoshGptSessionViewProvider {
       payload: {
         sessions: this.store.getSessions(),
         activeSessionId: this.store.getActiveSessionId(),
-        busy: this.busy
+        busy: this.busy,
+        settings: this._serializeSettings()
       }
     });
   }
@@ -335,6 +465,57 @@ class JoshGptSessionViewProvider {
       grid-template-rows: auto 1fr;
       min-height: 100px;
     }
+    .settings {
+      border-top: 1px solid var(--vscode-panel-border);
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      min-height: 170px;
+      max-height: 36vh;
+    }
+    .settings-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .settings-toolbar select {
+      padding: 2px 4px;
+      font: inherit;
+      color: inherit;
+      background: var(--vscode-dropdown-background);
+      border: 1px solid var(--vscode-dropdown-border);
+      border-radius: 4px;
+    }
+    .settings-note {
+      margin: 0;
+      padding: 6px 8px;
+      font-size: 11px;
+      opacity: 0.85;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 72px;
+      overflow: auto;
+    }
+    .settings-editor {
+      width: 100%;
+      min-height: 120px;
+      border: none;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      padding: 8px;
+      resize: none;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 11px;
+      color: inherit;
+      background: var(--vscode-editor-background);
+      box-sizing: border-box;
+    }
+    .settings-status {
+      padding: 6px 8px;
+      font-size: 11px;
+      opacity: 0.9;
+    }
     .trace-header {
       display: flex;
       align-items: center;
@@ -419,12 +600,36 @@ class JoshGptSessionViewProvider {
         </div>
         <pre id="traceContent" class="trace-content"></pre>
       </div>
+      <div class="settings">
+        <div class="trace-header">
+          <span>Settings</span>
+          <button id="openSettingsBtn" class="secondary">Open VS Code Settings</button>
+        </div>
+        <div class="settings-toolbar">
+          <label for="settingsScope">Save scope</label>
+          <select id="settingsScope">
+            <option value="user">User</option>
+            <option value="workspace">Workspace</option>
+          </select>
+          <button id="reloadSettingsBtn" class="secondary">Reload</button>
+          <button id="saveSettingsBtn">Save</button>
+        </div>
+        <pre id="settingsNote" class="settings-note"></pre>
+        <textarea id="settingsJson" class="settings-editor" spellcheck="false"></textarea>
+        <div id="settingsStatus" class="settings-status"></div>
+      </div>
     </section>
   </div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    let state = { sessions: [], activeSessionId: null, busy: false };
+    let state = {
+      sessions: [],
+      activeSessionId: null,
+      busy: false,
+      settings: { fields: [], values: {}, signature: "", hasWorkspace: false }
+    };
+    let settingsDirty = false;
 
     const listEl = document.getElementById("sessionList");
     const titleEl = document.getElementById("chatTitle");
@@ -434,6 +639,13 @@ class JoshGptSessionViewProvider {
     const promptInput = document.getElementById("promptInput");
     const deleteBtn = document.getElementById("deleteSessionBtn");
     const clearTraceBtn = document.getElementById("clearTraceBtn");
+    const settingsScopeEl = document.getElementById("settingsScope");
+    const settingsJsonEl = document.getElementById("settingsJson");
+    const settingsNoteEl = document.getElementById("settingsNote");
+    const settingsStatusEl = document.getElementById("settingsStatus");
+    const reloadSettingsBtn = document.getElementById("reloadSettingsBtn");
+    const saveSettingsBtn = document.getElementById("saveSettingsBtn");
+    const openSettingsBtn = document.getElementById("openSettingsBtn");
 
     function activeSession() {
       return state.sessions.find((s) => s.id === state.activeSessionId) || null;
@@ -556,10 +768,35 @@ class JoshGptSessionViewProvider {
       promptInput.disabled = state.busy;
     }
 
-    function render() {
+    function renderSettings(force) {
+      const settings = state.settings || {};
+      const values = settings.values || {};
+      const fields = Array.isArray(settings.fields) ? settings.fields : [];
+      const supportedKeys = fields.map((f) => f.key).join(", ");
+      settingsNoteEl.textContent = supportedKeys
+        ? "Editable keys: " + supportedKeys
+        : "No editable settings metadata received.";
+
+      const workspaceAvailable = Boolean(settings.hasWorkspace);
+      const chosenScope = settingsScopeEl.value || "user";
+      if (!workspaceAvailable && chosenScope === "workspace") {
+        settingsScopeEl.value = "user";
+      }
+      settingsScopeEl.querySelector('option[value=\"workspace\"]').disabled = !workspaceAvailable;
+
+      if (force || !settingsDirty) {
+        settingsJsonEl.value = JSON.stringify(values, null, 2);
+        settingsDirty = false;
+      }
+      settingsStatusEl.textContent =
+        "Workspace scope available: " + (workspaceAvailable ? "yes" : "no");
+    }
+
+    function render(forceSettings) {
       renderSessions();
       renderMessages();
       renderBusyState();
+      renderSettings(forceSettings);
     }
 
     document.getElementById("newSessionBtn").addEventListener("click", () => {
@@ -576,6 +813,40 @@ class JoshGptSessionViewProvider {
       const active = activeSession();
       if (!active) return;
       vscode.postMessage({ type: "clearTrace", sessionId: active.id });
+    });
+
+    settingsJsonEl.addEventListener("input", () => {
+      settingsDirty = true;
+      settingsStatusEl.textContent = "Settings edited but not saved.";
+    });
+
+    reloadSettingsBtn.addEventListener("click", () => {
+      settingsDirty = false;
+      settingsStatusEl.textContent = "Reloading settings...";
+      vscode.postMessage({ type: "reloadSettings" });
+    });
+
+    saveSettingsBtn.addEventListener("click", () => {
+      let parsed;
+      try {
+        parsed = JSON.parse(settingsJsonEl.value || "{}");
+      } catch (err) {
+        settingsStatusEl.textContent =
+          "Invalid JSON: " + (err instanceof Error ? err.message : String(err));
+        return;
+      }
+
+      settingsStatusEl.textContent = "Saving settings...";
+      settingsDirty = false;
+      vscode.postMessage({
+        type: "saveSettings",
+        scope: settingsScopeEl.value || "user",
+        values: parsed
+      });
+    });
+
+    openSettingsBtn.addEventListener("click", () => {
+      vscode.postMessage({ type: "openSettingsUi" });
     });
 
     function sendPrompt() {
@@ -599,8 +870,12 @@ class JoshGptSessionViewProvider {
       if (!msg || msg.type !== "state") {
         return;
       }
-      state = msg.payload || state;
-      render();
+      const nextState = msg.payload || state;
+      const currentSig = state && state.settings ? state.settings.signature : "";
+      const nextSig = nextState && nextState.settings ? nextState.settings.signature : "";
+      const forceSettings = currentSig !== nextSig;
+      state = nextState;
+      render(forceSettings);
     });
 
     vscode.postMessage({ type: "ready" });

@@ -8,6 +8,7 @@ This starter provides a minimal `JoshGPT` VS Code extension that supports:
 
 - Adds a JoshGPT activity-bar view with persistent chat sessions
 - Includes a Trace pane for model/tool execution events per session
+- Includes an in-extension Settings panel for editing `joshgpt.*` configuration
 - Adds command `JoshGPT: List Models`
 - Adds command `JoshGPT: Ask Model`
 - Adds command `JoshGPT: New Session`
@@ -55,6 +56,7 @@ This starter provides a minimal `JoshGPT` VS Code extension that supports:
 - In native stream mode, trace includes raw stream event names and payload snippets.
 - Output channel logs tool calls with argument payloads (redacted/truncated for sensitive/large values).
 - Local shell execution is mirrored to a `JoshGPT Local Shell` terminal by default.
+- Settings pane accepts JSON for supported keys, then writes through VS Code config APIs (User or Workspace scope).
 
 ## Package Test
 
