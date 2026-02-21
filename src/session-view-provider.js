@@ -501,10 +501,7 @@ class JoshGptSessionViewProvider {
     }
     .settings {
       border-bottom: 1px solid var(--vscode-panel-border);
-      display: grid;
-      grid-template-rows: auto auto 1fr auto;
-      min-height: 170px;
-      max-height: 36vh;
+      margin: 0;
     }
     .settings[open] > summary {
       border-bottom: 1px solid var(--vscode-panel-border);
@@ -556,7 +553,9 @@ class JoshGptSessionViewProvider {
     }
     .settings-editor {
       width: 100%;
-      min-height: 120px;
+      height: 140px;
+      min-height: 100px;
+      max-height: 24vh;
       border: none;
       border-bottom: 1px solid var(--vscode-panel-border);
       padding: 8px;
