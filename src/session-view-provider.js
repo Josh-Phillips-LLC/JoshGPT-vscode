@@ -395,7 +395,7 @@ class JoshGptSessionViewProvider {
     }
     .chat {
       display: grid;
-      grid-template-rows: auto 1fr auto auto;
+      grid-template-rows: auto auto 1fr auto;
       min-width: 0;
     }
     .chat-header {
@@ -405,6 +405,11 @@ class JoshGptSessionViewProvider {
       gap: 8px;
       padding: 8px;
       border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .chat-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
     .chat-title {
       font-size: 13px;
@@ -450,6 +455,36 @@ class JoshGptSessionViewProvider {
       font-size: 12px;
       line-height: 1.45;
     }
+    details.message-trace {
+      margin-top: 8px;
+      border-top: 1px dashed var(--vscode-panel-border);
+      padding-top: 6px;
+    }
+    details.message-trace > summary {
+      cursor: pointer;
+      font-size: 11px;
+      opacity: 0.9;
+      list-style: none;
+      user-select: none;
+    }
+    details.message-trace > summary::-webkit-details-marker {
+      display: none;
+    }
+    details.message-trace > summary::before {
+      content: "▸ ";
+    }
+    details.message-trace[open] > summary::before {
+      content: "▾ ";
+    }
+    .message-trace-content {
+      margin: 6px 0 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 11px;
+      line-height: 1.4;
+      opacity: 0.95;
+    }
     .composer {
       border-top: 1px solid var(--vscode-panel-border);
       padding: 8px;
@@ -458,19 +493,34 @@ class JoshGptSessionViewProvider {
       gap: 8px;
       align-items: end;
     }
-    .trace {
-      border-top: 1px solid var(--vscode-panel-border);
-      max-height: 28vh;
-      display: grid;
-      grid-template-rows: auto 1fr;
-      min-height: 100px;
-    }
     .settings {
-      border-top: 1px solid var(--vscode-panel-border);
+      border-bottom: 1px solid var(--vscode-panel-border);
       display: grid;
       grid-template-rows: auto auto 1fr auto;
       min-height: 170px;
       max-height: 36vh;
+    }
+    .settings[open] > summary {
+      border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .settings > summary {
+      padding: 6px 8px;
+      font-size: 11px;
+      opacity: 0.9;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      user-select: none;
+      list-style: none;
+    }
+    .settings > summary::-webkit-details-marker {
+      display: none;
+    }
+    .settings > summary::before {
+      content: "▸ ";
+    }
+    .settings[open] > summary::before {
+      content: "▾ ";
     }
     .settings-toolbar {
       display: flex;
@@ -515,29 +565,6 @@ class JoshGptSessionViewProvider {
       padding: 6px 8px;
       font-size: 11px;
       opacity: 0.9;
-    }
-    .trace-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      padding: 6px 8px;
-      font-size: 11px;
-      opacity: 0.9;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      border-bottom: 1px solid var(--vscode-panel-border);
-    }
-    .trace-content {
-      margin: 0;
-      padding: 8px;
-      overflow: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-family: var(--vscode-editor-font-family);
-      font-size: 11px;
-      line-height: 1.4;
-      opacity: 0.95;
     }
     .composer textarea {
       min-height: 56px;
@@ -586,25 +613,13 @@ class JoshGptSessionViewProvider {
     <section class="chat">
       <div class="chat-header">
         <div id="chatTitle" class="chat-title">No active session</div>
-        <button id="deleteSessionBtn" class="secondary">Delete</button>
-      </div>
-      <div id="messages" class="messages"></div>
-      <div class="composer">
-        <textarea id="promptInput" placeholder="Ask JoshGPT..."></textarea>
-        <button id="sendBtn">Send</button>
-      </div>
-      <div class="trace">
-        <div class="trace-header">
-          <span>Trace</span>
-          <button id="clearTraceBtn" class="secondary">Clear</button>
+        <div class="chat-actions">
+          <button id="clearTraceBtn" class="secondary">Clear Trace</button>
+          <button id="deleteSessionBtn" class="secondary">Delete</button>
         </div>
-        <pre id="traceContent" class="trace-content"></pre>
       </div>
-      <div class="settings">
-        <div class="trace-header">
-          <span>Settings</span>
-          <button id="openSettingsBtn" class="secondary">Open VS Code Settings</button>
-        </div>
+      <details id="settingsPanel" class="settings">
+        <summary>Settings</summary>
         <div class="settings-toolbar">
           <label for="settingsScope">Save scope</label>
           <select id="settingsScope">
@@ -613,10 +628,16 @@ class JoshGptSessionViewProvider {
           </select>
           <button id="reloadSettingsBtn" class="secondary">Reload</button>
           <button id="saveSettingsBtn">Save</button>
+          <button id="openSettingsBtn" class="secondary">Open VS Code Settings</button>
         </div>
         <pre id="settingsNote" class="settings-note"></pre>
         <textarea id="settingsJson" class="settings-editor" spellcheck="false"></textarea>
         <div id="settingsStatus" class="settings-status"></div>
+      </details>
+      <div id="messages" class="messages"></div>
+      <div class="composer">
+        <textarea id="promptInput" placeholder="Ask JoshGPT..."></textarea>
+        <button id="sendBtn">Send</button>
       </div>
     </section>
   </div>
@@ -634,11 +655,11 @@ class JoshGptSessionViewProvider {
     const listEl = document.getElementById("sessionList");
     const titleEl = document.getElementById("chatTitle");
     const messagesEl = document.getElementById("messages");
-    const traceEl = document.getElementById("traceContent");
     const sendBtn = document.getElementById("sendBtn");
     const promptInput = document.getElementById("promptInput");
     const deleteBtn = document.getElementById("deleteSessionBtn");
     const clearTraceBtn = document.getElementById("clearTraceBtn");
+    const settingsPanelEl = document.getElementById("settingsPanel");
     const settingsScopeEl = document.getElementById("settingsScope");
     const settingsJsonEl = document.getElementById("settingsJson");
     const settingsNoteEl = document.getElementById("settingsNote");
@@ -702,23 +723,24 @@ class JoshGptSessionViewProvider {
         messagesEl.appendChild(empty);
         titleEl.textContent = "No active session";
         deleteBtn.disabled = true;
-        traceEl.textContent = "No active session.";
         clearTraceBtn.disabled = true;
         return;
       }
 
       titleEl.textContent = active.title || "Untitled Session";
       deleteBtn.disabled = false;
-      clearTraceBtn.disabled = false;
+      clearTraceBtn.disabled = !Array.isArray(active.traceEvents) || active.traceEvents.length === 0;
 
       if (!active.messages.length) {
         const empty = document.createElement("div");
         empty.className = "empty";
         empty.textContent = "No messages yet.";
         messagesEl.appendChild(empty);
-        renderTrace(active);
         return;
       }
+
+      const traceRuns = buildTraceRuns(active);
+      let assistantIndex = 0;
 
       for (const message of active.messages) {
         const wrapper = document.createElement("div");
@@ -734,10 +756,18 @@ class JoshGptSessionViewProvider {
 
         wrapper.appendChild(header);
         wrapper.appendChild(content);
+
+        if (message.role === "assistant") {
+          const traceForAssistant = assistantIndex < traceRuns.length ? traceRuns[assistantIndex] : [];
+          assistantIndex += 1;
+          if (traceForAssistant.length) {
+            wrapper.appendChild(renderInlineTrace(traceForAssistant));
+          }
+        }
+
         messagesEl.appendChild(wrapper);
       }
       messagesEl.scrollTop = messagesEl.scrollHeight;
-      renderTrace(active);
     }
 
     function formatTraceLine(event) {
@@ -752,14 +782,42 @@ class JoshGptSessionViewProvider {
       return header + "\\n" + details;
     }
 
-    function renderTrace(active) {
+    function buildTraceRuns(active) {
       const traceEvents = Array.isArray(active.traceEvents) ? active.traceEvents : [];
       if (!traceEvents.length) {
-        traceEl.textContent = "No trace events for this session yet.";
-        return;
+        return [];
       }
-      traceEl.textContent = traceEvents.map(formatTraceLine).join("\\n\\n");
-      traceEl.scrollTop = traceEl.scrollHeight;
+
+      const runs = [];
+      let current = [];
+      for (const event of traceEvents) {
+        if (String(event.type || "") === "start" && current.length) {
+          runs.push(current);
+          current = [event];
+          continue;
+        }
+        current.push(event);
+      }
+      if (current.length) {
+        runs.push(current);
+      }
+      return runs;
+    }
+
+    function renderInlineTrace(traceEvents) {
+      const details = document.createElement("details");
+      details.className = "message-trace";
+
+      const summary = document.createElement("summary");
+      summary.textContent = "Trace (" + traceEvents.length + " events)";
+
+      const content = document.createElement("pre");
+      content.className = "message-trace-content";
+      content.textContent = traceEvents.map(formatTraceLine).join("\\n\\n");
+
+      details.appendChild(summary);
+      details.appendChild(content);
+      return details;
     }
 
     function renderBusyState() {
