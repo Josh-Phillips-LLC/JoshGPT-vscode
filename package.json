@@ -195,7 +195,8 @@
     "test:local-shell": "node ./scripts/local-shell-self-test.js",
     "test:native": "node ./scripts/native-stream-self-test.js",
     "test:mcp": "node ./scripts/mcp-self-test.js",
-    "package:vsix": "npx @vscode/vsce package --no-dependencies"
+    "package:vsix": "npx @vscode/vsce package --no-dependencies",
+    "package:latest-vsix": "npx @vscode/vsce package --no-dependencies --out joshgpt-latest.vsix"
   },
   "devDependencies": {}
 }

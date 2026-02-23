@@ -62,17 +62,23 @@ This starter provides a minimal `JoshGPT` VS Code extension that supports:
 
 ## Package Test
 
-Create a VSIX:
+Create a versioned VSIX:
 
 ```bash
 npm run package:vsix
+```
+
+Create/update the canonical tracked artifact:
+
+```bash
+npm run package:latest-vsix
 ```
 
 Install into an isolated extensions directory:
 
 ```bash
 code --extensions-dir /tmp/vscode-lmstudio-ext-test \
-  --install-extension ./joshgpt-0.0.9.vsix --force
+  --install-extension ./joshgpt-latest.vsix --force
 ```
 
 Verify:
@@ -189,3 +195,4 @@ LMSTUDIO_MODEL=oss20b-local npm run test:client
 
 - This is intentionally a small spike, not a full agent orchestration extension.
 - Tool-calling/MCP orchestration can be layered on after basic chat reliability is proven.
+- Repository artifact policy: only `joshgpt-latest.vsix` is tracked; versioned `*.vsix` files remain ignored.
