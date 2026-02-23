@@ -247,14 +247,27 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       }
       addTrace("mcp", "MCP disabled for this turn.", msg);
       mcpEnabled = false;
+      if (localShellEnabled) {
+        openAiTools = [...localTools];
+        if (output) {
+          output.appendLine("[joshgpt] Falling back to local shell tool for this turn.");
+        }
+        addTrace("tool", "Fallback enabled: local shell tool remains active.");
+      }
     }
   } else if (localShellEnabled) {
     openAiTools = [...localTools];
     addTrace("tool", "MCP disabled; local shell tool is active.");
   }
 
-  if (mcpEnabled && localShellEnabled && !openAiTools.length) {
-    openAiTools = [...localTools];
+  if (localShellEnabled) {
+    const hasLocalShellTool = openAiTools.some(
+      (tool) => tool && tool.function && tool.function.name === LOCAL_SHELL_TOOL_NAME
+    );
+    if (!hasLocalShellTool) {
+      openAiTools = [...localTools, ...openAiTools];
+      addTrace("tool", "Ensured local shell tool availability for this turn.");
+    }
   }
 
   const workingMessages = Array.isArray(messages) ? [...messages] : [];
