@@ -9,6 +9,8 @@ const { McpHttpClient } = require("./mcp-client");
 const { runChatWithOptionalMcp } = require("./chat-runner");
 const { createLocalShellMirror } = require("./local-shell-mirror");
 const { resolveInheritedInstructions } = require("./instruction-resolver");
+const { resolveSupervisionProfile } = require("./supervision-profile-resolver");
+const { checkSupervisorReadiness } = require("./supervisor-readiness");
 
 const DEFAULT_MCP_BASE_URL = "http://127.0.0.1:8790/mcp";
 const DEFAULT_NATIVE_BASE_URL = "http://localhost:1234";
@@ -51,6 +53,9 @@ function getConfig() {
     mcpTimeoutMs: Number(rootCfg.get("joshgpt.mcp.timeoutMs") || 15000),
     mcpMaxToolRounds: Number(rootCfg.get("joshgpt.mcp.maxToolRounds") || 4),
     supervisorEnabled: Boolean(rootCfg.get("joshgpt.supervisor.enabled") ?? true),
+    supervisorModelEscalationEnabled: Boolean(
+      rootCfg.get("joshgpt.supervisor.modelEscalationEnabled") ?? true
+    ),
     supervisorDispatcherBaseUrl: normalizeBaseUrl(
       String(
         rootCfg.get("joshgpt.supervisor.dispatcherBaseUrl") ||
@@ -63,6 +68,21 @@ function getConfig() {
           DEFAULT_SUPERVISOR_CAPABILITY_BASE_URL
       )
     ),
+    supervisorMaxEscalationsPerTurn: Number(
+      rootCfg.get("joshgpt.supervisor.maxEscalationsPerTurn") || 1
+    ),
+    supervisorMaxEscalationsPerSession: Number(
+      rootCfg.get("joshgpt.supervisor.maxEscalationsPerSession") || 3
+    ),
+    supervisorEscalationCooldownMs: Number(
+      rootCfg.get("joshgpt.supervisor.escalationCooldownMs") || 15000
+    ),
+    supervisorWorkerRoleSlug: String(
+      rootCfg.get("joshgpt.supervisor.workerRoleSlug") || ""
+    ).trim(),
+    supervisorSupervisorRoleSlug: String(
+      rootCfg.get("joshgpt.supervisor.supervisorRoleSlug") || ""
+    ).trim(),
     instructionsInheritVscodeInstructions: Boolean(
       rootCfg.get("joshgpt.instructions.inheritVscodeInstructions") ?? true
     ),
@@ -210,7 +230,16 @@ async function askModel(output) {
   const { text } = await runChatWithOptionalMcp({
     config: {
       ...cfg,
-      instructionInheritance
+      instructionInheritance,
+      supervisorSessionContext: {
+        objective: userPrompt,
+        roleContextRef: instructionInheritance.canonicalPath || "workspace://AGENTS.md",
+        attemptHistory: [],
+        evidenceSummary: "",
+        blockedReason: "insufficient_context",
+        currentPhase: "validation",
+        requestedDecision: "next_step"
+      }
     },
     messages: modelMessages,
     output
@@ -250,6 +279,54 @@ async function mcpStatus(output) {
   vscode.window.showInformationMessage(
     `JoshGPT MCP connected: ${names.length} tool(s) at ${cfg.mcpBaseUrl}`
   );
+}
+
+async function supervisorStatus(output) {
+  const cfg = getConfig();
+  if (!cfg.supervisorEnabled) {
+    vscode.window.showInformationMessage(
+      "Supervisor flow is disabled (joshgpt.supervisor.enabled=false)."
+    );
+    return;
+  }
+
+  const profile = resolveSupervisionProfile({
+    workspaceRoot: cfg.workspaceRoot,
+    settingsFallback: {
+      workerRoleSlug: cfg.supervisorWorkerRoleSlug,
+      supervisorRoleSlug: cfg.supervisorSupervisorRoleSlug
+    }
+  });
+  const readiness = await checkSupervisorReadiness({
+    dispatcherBaseUrl: cfg.supervisorDispatcherBaseUrl,
+    capabilityBaseUrl: cfg.supervisorCapabilityBaseUrl,
+    timeoutMs: cfg.mcpTimeoutMs,
+    output
+  });
+  output.appendLine(`[joshgpt] supervisor_status=${readiness.status}`);
+  output.appendLine(`[joshgpt] supervisor_summary=${readiness.summary}`);
+  output.appendLine(
+    `[joshgpt] supervision_profile_source=${profile.source} resolved=${profile.resolved ? "yes" : "no"}`
+  );
+  if (profile.warning) {
+    output.appendLine(`[joshgpt] supervision_profile_warning=${profile.warning}`);
+  }
+  if (profile.error) {
+    output.appendLine(`[joshgpt] supervision_profile_error=${profile.error}`);
+  }
+  output.show(true);
+  if (readiness.ready && profile.resolved) {
+    vscode.window.showInformationMessage("Supervisor readiness check passed.");
+  } else {
+    const msg = [
+      `Supervisor status: ${readiness.status}.`,
+      profile.resolved ? "" : `Profile error: ${profile.error || "missing role bindings."}`,
+      readiness.summary
+    ]
+      .filter(Boolean)
+      .join(" ");
+    vscode.window.showWarningMessage(msg);
+  }
 }
 
 function activate(context) {
@@ -313,6 +390,31 @@ function activate(context) {
     vscode.commands.registerCommand("joshgpt.mcpStatus", async () => {
       try {
         await mcpStatus(output);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        output.appendLine(`[joshgpt] error: ${msg}`);
+        vscode.window.showErrorMessage(msg);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("joshgpt.checkSupervisorStatus", async () => {
+      try {
+        await supervisorStatus(output);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        output.appendLine(`[joshgpt] error: ${msg}`);
+        vscode.window.showErrorMessage(msg);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("joshgpt.escalateToSupervisor", async () => {
+      try {
+        await vscode.commands.executeCommand("workbench.view.extension.joshgpt");
+        await sessionProvider.escalateActiveSessionFromCommand();
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         output.appendLine(`[joshgpt] error: ${msg}`);

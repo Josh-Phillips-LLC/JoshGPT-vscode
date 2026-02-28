@@ -6,7 +6,7 @@ JoshGPT VS Code extension for LM Studio with MCP tools, canonical workspace inst
 
 - Chat backend: LM Studio (`openai-compat` or `lmstudio-native-stream`).
 - MCP tools: loaded from `joshgpt.mcp.baseUrl` (execution tools are hidden from model exposure).
-- Supervisor escalation: extension-side wrapper tool only.
+- Supervisor escalation: model-first + extension-side wrapper orchestration.
   - Wrapper internally orchestrates:
     - `dispatch_role_task`
     - `submit_supervisor_question`
@@ -16,6 +16,48 @@ JoshGPT VS Code extension for LM Studio with MCP tools, canonical workspace inst
     - `JOSHGPT_DISPATCHER_SHARED_TOKEN`
     - `JOSHGPT_SUPERVISOR_SHARED_TOKEN`
   - Raw token fields are never model-visible.
+
+## Supervisor Trigger Model
+
+- Default behavior: prompts go to the local model first; the model decides when to call `request_codex_supervisor_decision`.
+- Model-visible supervisor args are intentionally minimal (`question` + optional reason/context fields).
+- Extension injects role/scope metadata from profile resolution (never from model-provided token/role fields).
+- Manual fallback is available:
+  - Command Palette: `JoshGPT: Escalate To Supervisor`
+  - Session UI: `Escalate` button
+
+Guardrails:
+
+- per-turn escalation cap (`joshgpt.supervisor.maxEscalationsPerTurn`)
+- per-session escalation cap (`joshgpt.supervisor.maxEscalationsPerSession`)
+- cooldown / duplicate suppression (`joshgpt.supervisor.escalationCooldownMs`)
+
+Readiness:
+
+- automatic preflight in prompt runs
+- manual status check via `JoshGPT: Check Supervisor Status`
+
+## Supervision Profile Resolution
+
+Role bindings are resolved in this order:
+
+1. `<workspaceRoot>/.joshgpt/supervision.json` (canonical)
+2. settings fallback:
+   - `joshgpt.supervisor.workerRoleSlug`
+   - `joshgpt.supervisor.supervisorRoleSlug`
+
+Canonical profile format:
+
+```json
+{
+  "version": 1,
+  "worker_role_slug": "implementation-specialist",
+  "supervisor_role_slug": "hr-ai-agent-specialist",
+  "authorized_scope_id": "extension-supervisor-scope",
+  "authorized_targets": ["workspace"],
+  "requested_decision_default": "next_step"
+}
+```
 
 ## Instruction Inheritance
 
@@ -51,8 +93,14 @@ Trace metadata includes:
 Existing settings remain. Added cutover settings:
 
 - `joshgpt.supervisor.enabled`
+- `joshgpt.supervisor.modelEscalationEnabled`
 - `joshgpt.supervisor.dispatcherBaseUrl`
 - `joshgpt.supervisor.capabilityBaseUrl`
+- `joshgpt.supervisor.maxEscalationsPerTurn`
+- `joshgpt.supervisor.maxEscalationsPerSession`
+- `joshgpt.supervisor.escalationCooldownMs`
+- `joshgpt.supervisor.workerRoleSlug`
+- `joshgpt.supervisor.supervisorRoleSlug`
 - `joshgpt.instructions.inheritVscodeInstructions`
 - `joshgpt.instructions.maxChars`
 
@@ -92,6 +140,8 @@ npm run test:local-shell
 npm run test:native
 npm run test:mcp
 npm run test:instructions
+npm run test:supervision-profile
+npm run test:supervisor-readiness
 npm run test:supervisor-wrapper
 ```
 

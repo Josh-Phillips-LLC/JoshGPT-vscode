@@ -34,6 +34,11 @@ const ALLOWED_REQUESTED_DECISION = new Set([
 ]);
 const TERMINAL_DECISIONS = new Set(["pause_for_human", "stop"]);
 
+const DEFAULT_SCOPE_ID = "extension-supervisor-scope";
+const DEFAULT_TARGETS = ["workspace"];
+const DEFAULT_REQUESTED_DECISION = "next_step";
+const DEFAULT_ESCALATION_REASON = "needs_supervisor_decision";
+
 function asString(value) {
   return String(value || "").trim();
 }
@@ -74,6 +79,29 @@ function isoUtcPlusHours(now, hours) {
 
 function sha256Hex(value) {
   return crypto.createHash("sha256").update(String(value || ""), "utf8").digest("hex");
+}
+
+function abbreviate(text, maxChars = 220) {
+  const normalized = asString(text).replace(/\s+/g, " ");
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxChars)}...`;
+}
+
+function chooseList(primary, fallback, maxItems = 20) {
+  const first = asStringList(primary, maxItems);
+  if (first.length) {
+    return first;
+  }
+  return asStringList(fallback, maxItems);
+}
+
+function normalizeQuestionForHash(input) {
+  return asString(input)
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .slice(0, 2000);
 }
 
 function tryParseJsonObject(text) {
@@ -118,6 +146,28 @@ function unwrapToolResult(raw) {
   return raw;
 }
 
+function buildPauseForHumanDecision(reason, nextActions = []) {
+  const fallbackNextActions = nextActions.length
+    ? nextActions
+    : [
+        "Review the escalation context and confirm supervisor endpoints are reachable.",
+        "Verify dispatcher/supervisor shared tokens are present in extension environment.",
+        "Retry escalation after resolving runtime/auth issues."
+      ];
+  return {
+    decision: "pause_for_human",
+    rationale: `Supervisor wrapper fail-safe: ${asString(reason) || "manual review required."}`,
+    next_actions: fallbackNextActions,
+    confidence: 0.1,
+    safety_checks: [
+      "Token handling remained extension-local",
+      "Escalation payload captured",
+      "Human review required before continuation"
+    ],
+    audit_tags: ["fail-safe", "supervisor-wrapper"]
+  };
+}
+
 function asSupervisorDecisionPayload(raw, reasonIfInvalid = "") {
   const decision = unwrapToolResult(raw);
   if (
@@ -137,25 +187,6 @@ function asSupervisorDecisionPayload(raw, reasonIfInvalid = "") {
   return buildPauseForHumanDecision(
     reasonIfInvalid || "Supervisor returned malformed decision payload."
   );
-}
-
-function buildPauseForHumanDecision(reason) {
-  return {
-    decision: "pause_for_human",
-    rationale: `Supervisor wrapper fail-safe: ${asString(reason) || "manual review required."}`,
-    next_actions: [
-      "Review the escalation context and confirm supervisor endpoints are reachable.",
-      "Verify dispatcher/supervisor shared tokens are present in extension environment.",
-      "Retry escalation after resolving runtime/auth issues."
-    ],
-    confidence: 0.1,
-    safety_checks: [
-      "Token handling remained extension-local",
-      "Escalation payload captured",
-      "Human review required before continuation"
-    ],
-    audit_tags: ["fail-safe", "supervisor-wrapper"]
-  };
 }
 
 function buildWrapperResult({
@@ -181,6 +212,21 @@ function buildWrapperResult({
     dispatcher: dispatcherSummary,
     error: asString(error)
   };
+}
+
+function buildGuardrailBlockedWrapperResult(reason) {
+  return buildWrapperResult({
+    ok: false,
+    error: asString(reason) || "Supervisor escalation blocked by policy guardrail.",
+    decisionPayload: buildPauseForHumanDecision(
+      asString(reason) || "Supervisor escalation blocked by policy guardrail.",
+      [
+        "Review recent escalation attempts in trace logs.",
+        "Adjust supervisor guardrail settings if tighter policy is unintended.",
+        "Retry escalation after cooldown or with materially new context."
+      ]
+    )
+  });
 }
 
 function buildGuardedSupervisorMessage(wrapperResult) {
@@ -215,19 +261,8 @@ function getSupervisorWrapperOpenAiTool() {
         type: "object",
         additionalProperties: false,
         properties: {
-          worker_role_slug: { type: "string" },
-          supervisor_role_slug: { type: "string" },
-          objective: { type: "string" },
-          escalation_reason: { type: "string" },
           question: { type: "string" },
-          role_context_ref: { type: "string" },
-          constraints: { type: "array", items: { type: "string" }, maxItems: 20 },
-          input_refs: { type: "array", items: { type: "string" }, maxItems: 20 },
-          mission_id: { type: "string" },
-          current_phase: {
-            type: "string",
-            enum: ["discovery", "classification", "validation", "reporting"]
-          },
+          escalation_reason: { type: "string" },
           blocked_reason: {
             type: "string",
             enum: [
@@ -238,81 +273,210 @@ function getSupervisorWrapperOpenAiTool() {
               "repeated_failure"
             ]
           },
+          current_phase: {
+            type: "string",
+            enum: ["discovery", "classification", "validation", "reporting"]
+          },
           attempt_history: { type: "array", items: { type: "string" }, maxItems: 20 },
           evidence_summary: { type: "string" },
-          authorized_scope_id: { type: "string" },
-          authorized_targets: { type: "array", items: { type: "string" }, maxItems: 20 },
-          authorized_expires_utc: { type: "string" },
           requested_decision: {
             type: "string",
             enum: ["next_step", "prioritize", "deconflict", "stop_or_continue"]
           }
         },
-        required: [
-          "worker_role_slug",
-          "supervisor_role_slug",
-          "objective",
-          "escalation_reason",
-          "question"
-        ]
+        required: ["question"]
       }
     }
   };
 }
 
-function buildDispatcherTaskPayload(input) {
+function resolveGuardrailPolicy(policy = {}) {
+  const maxPerTurn = Math.max(1, Number(policy.maxPerTurn) || 1);
+  const maxPerSession = Math.max(1, Number(policy.maxPerSession) || 3);
+  const cooldownMs = Math.max(0, Number(policy.cooldownMs) || 15000);
   return {
-    task_id: asString(input.mission_id) || crypto.randomUUID(),
-    worker_role_slug: asString(input.worker_role_slug),
-    supervisor_role_slug: asString(input.supervisor_role_slug),
-    objective: asString(input.objective),
-    constraints: asStringList(input.constraints, 20),
-    input_refs: asStringList(input.input_refs, 20)
+    maxPerTurn,
+    maxPerSession,
+    cooldownMs
   };
 }
 
-function buildSupervisorRequestPayload(input, missionId, now) {
-  const constraints = asStringList(input.constraints, 20);
-  const authorizedTargets = asStringList(input.authorized_targets, 20);
-  const effectiveTargets = authorizedTargets.length > 0 ? authorizedTargets : ["workspace"];
-  const evidenceSummary = asString(input.evidence_summary);
+function evaluateSupervisorEscalationGuardrails({
+  input,
+  state = {},
+  policy = {},
+  nowMs = Date.now()
+} = {}) {
+  const rules = resolveGuardrailPolicy(policy);
+  const currentState = {
+    turnEscalationCount: Math.max(0, Number(state.turnEscalationCount) || 0),
+    sessionEscalationCount: Math.max(0, Number(state.sessionEscalationCount) || 0),
+    lastEscalationAtMs: Math.max(0, Number(state.lastEscalationAtMs) || 0),
+    lastEscalationQuestionHash: asString(state.lastEscalationQuestionHash)
+  };
+  const question = asString(input && input.question);
+  if (!question) {
+    return {
+      allowed: false,
+      reason: "Supervisor escalation requires a non-empty question.",
+      state: currentState
+    };
+  }
+  if (currentState.turnEscalationCount >= rules.maxPerTurn) {
+    return {
+      allowed: false,
+      reason: `Supervisor escalation blocked: per-turn limit reached (${rules.maxPerTurn}).`,
+      state: currentState
+    };
+  }
+  if (currentState.sessionEscalationCount >= rules.maxPerSession) {
+    return {
+      allowed: false,
+      reason: `Supervisor escalation blocked: per-session limit reached (${rules.maxPerSession}).`,
+      state: currentState
+    };
+  }
+
+  if (rules.cooldownMs > 0 && currentState.lastEscalationAtMs > 0) {
+    const elapsedMs = nowMs - currentState.lastEscalationAtMs;
+    if (elapsedMs < rules.cooldownMs) {
+      const hash = sha256Hex(normalizeQuestionForHash(question));
+      if (hash === currentState.lastEscalationQuestionHash) {
+        return {
+          allowed: false,
+          reason:
+            "Supervisor escalation blocked: duplicate escalation during cooldown window.",
+          state: currentState
+        };
+      }
+      return {
+        allowed: false,
+        reason: `Supervisor escalation blocked: cooldown active (${rules.cooldownMs}ms).`,
+        state: currentState
+      };
+    }
+  }
+
+  const nextState = {
+    turnEscalationCount: currentState.turnEscalationCount + 1,
+    sessionEscalationCount: currentState.sessionEscalationCount + 1,
+    lastEscalationAtMs: nowMs,
+    lastEscalationQuestionHash: sha256Hex(normalizeQuestionForHash(question))
+  };
   return {
-    mission_id: asString(missionId),
-    goal: asString(input.objective),
-    current_phase: chooseEnum(input.current_phase, ALLOWED_CURRENT_PHASE, "validation"),
-    blocked_reason: chooseEnum(
-      input.blocked_reason,
+    allowed: true,
+    reason: "",
+    state: nextState
+  };
+}
+
+function buildEffectiveEscalationContext(
+  input,
+  { supervisionProfile, sessionContext = {}, now = new Date() } = {}
+) {
+  const profile = supervisionProfile || {};
+  const objective =
+    asString(input.objective) ||
+    asString(sessionContext.objective) ||
+    abbreviate(asString(input.question), 220) ||
+    "Resolve current blocker with supervisor guidance.";
+  const roleContextRef =
+    asString(input.role_context_ref) ||
+    asString(sessionContext.roleContextRef) ||
+    "workspace://AGENTS.md";
+  const constraints = chooseList(input.constraints, sessionContext.constraints, 20);
+  const inputRefs = chooseList(input.input_refs, sessionContext.inputRefs, 20);
+  const attemptHistory = chooseList(
+    input.attempt_history,
+    sessionContext.attemptHistory,
+    20
+  );
+  const authorizedTargets = chooseList(
+    profile.authorizedTargets,
+    DEFAULT_TARGETS,
+    20
+  );
+
+  return {
+    missionId: asString(input.mission_id || sessionContext.missionId) || crypto.randomUUID(),
+    workerRoleSlug: asString(profile.workerRoleSlug),
+    supervisorRoleSlug: asString(profile.supervisorRoleSlug),
+    objective,
+    escalationReason:
+      asString(input.escalation_reason) ||
+      asString(sessionContext.escalationReason) ||
+      DEFAULT_ESCALATION_REASON,
+    question: asString(input.question),
+    roleContextRef,
+    constraints,
+    inputRefs,
+    currentPhase: chooseEnum(
+      input.current_phase || sessionContext.currentPhase,
+      ALLOWED_CURRENT_PHASE,
+      "validation"
+    ),
+    blockedReason: chooseEnum(
+      input.blocked_reason || sessionContext.blockedReason,
       ALLOWED_BLOCKED_REASON,
       "insufficient_context"
     ),
-    attempt_history: asStringList(input.attempt_history, 20),
-    evidence_summary: evidenceSummary,
-    constraints,
-    authorized_scope: {
-      scope_id: asString(input.authorized_scope_id) || "extension-supervisor-scope",
-      targets: effectiveTargets,
-      expires_utc:
-        asString(input.authorized_expires_utc) || isoUtcPlusHours(now, 1)
-    },
-    requested_decision: chooseEnum(
-      input.requested_decision,
+    attemptHistory,
+    evidenceSummary:
+      asString(input.evidence_summary) || asString(sessionContext.evidenceSummary),
+    authorizedScopeId: asString(profile.authorizedScopeId) || DEFAULT_SCOPE_ID,
+    authorizedTargets,
+    authorizedExpiresUtc:
+      asString(input.authorized_expires_utc || sessionContext.authorizedExpiresUtc) ||
+      isoUtcPlusHours(now, 1),
+    requestedDecision: chooseEnum(
+      input.requested_decision ||
+        sessionContext.requestedDecision ||
+        profile.requestedDecisionDefault,
       ALLOWED_REQUESTED_DECISION,
-      "next_step"
+      DEFAULT_REQUESTED_DECISION
     )
   };
 }
 
-function buildSupervisorQuestionPayload(input, taskId) {
-  const roleContextRef = asString(input.role_context_ref) || "workspace://AGENTS.md";
+function buildDispatcherTaskPayload(context) {
+  return {
+    task_id: context.missionId,
+    worker_role_slug: context.workerRoleSlug,
+    supervisor_role_slug: context.supervisorRoleSlug,
+    objective: context.objective,
+    constraints: context.constraints,
+    input_refs: context.inputRefs
+  };
+}
+
+function buildSupervisorRequestPayload(context) {
+  return {
+    mission_id: context.missionId,
+    goal: context.objective,
+    current_phase: context.currentPhase,
+    blocked_reason: context.blockedReason,
+    attempt_history: context.attemptHistory,
+    evidence_summary: context.evidenceSummary,
+    constraints: context.constraints,
+    authorized_scope: {
+      scope_id: context.authorizedScopeId,
+      targets: context.authorizedTargets,
+      expires_utc: context.authorizedExpiresUtc
+    },
+    requested_decision: context.requestedDecision
+  };
+}
+
+function buildSupervisorQuestionPayload(context, taskId) {
   return {
     task_id: asString(taskId),
-    from_role_slug: asString(input.worker_role_slug),
-    to_supervisor_role_slug: asString(input.supervisor_role_slug),
-    escalation_reason: asString(input.escalation_reason),
-    question: asString(input.question),
-    role_context_ref: roleContextRef,
+    from_role_slug: context.workerRoleSlug,
+    to_supervisor_role_slug: context.supervisorRoleSlug,
+    escalation_reason: context.escalationReason,
+    question: context.question,
+    role_context_ref: context.roleContextRef,
     role_context_sha256: sha256Hex(
-      `${roleContextRef}\n${asString(input.objective)}\n${asString(input.question)}`
+      `${context.roleContextRef}\n${context.objective}\n${context.question}`
     )
   };
 }
@@ -325,6 +489,9 @@ async function runSupervisorWrapperToolCall(
     timeoutMs = 15000,
     output = null,
     env = process.env,
+    supervisionProfile = null,
+    supervisionProfileSource = "",
+    sessionContext = {},
     mcpClientFactory = (options) => new McpHttpClient(options),
     nowFactory = () => new Date()
   } = {}
@@ -349,6 +516,31 @@ async function runSupervisorWrapperToolCall(
   }
 
   const now = nowFactory();
+  const context = buildEffectiveEscalationContext(input, {
+    supervisionProfile,
+    sessionContext,
+    now
+  });
+  if (!context.workerRoleSlug || !context.supervisorRoleSlug) {
+    return buildWrapperResult({
+      ok: false,
+      error:
+        "Supervisor wrapper requires resolved worker/supervisor role bindings in supervision profile."
+    });
+  }
+  if (!context.objective) {
+    return buildWrapperResult({
+      ok: false,
+      error: "Supervisor wrapper could not derive an objective from session context."
+    });
+  }
+  if (!context.question) {
+    return buildWrapperResult({
+      ok: false,
+      error: "Supervisor wrapper requires a non-empty question."
+    });
+  }
+
   const dispatcherClient = mcpClientFactory({
     baseUrl: dispatcherUrl,
     timeoutMs,
@@ -360,29 +552,11 @@ async function runSupervisorWrapperToolCall(
     output
   });
 
-  const taskPayload = buildDispatcherTaskPayload(input);
-  if (
-    !taskPayload.worker_role_slug ||
-    !taskPayload.supervisor_role_slug ||
-    !taskPayload.objective
-  ) {
-    return buildWrapperResult({
-      ok: false,
-      error:
-        "Supervisor wrapper requires worker_role_slug, supervisor_role_slug, and objective."
-    });
-  }
-  if (!asString(input.escalation_reason) || !asString(input.question)) {
-    return buildWrapperResult({
-      ok: false,
-      error: "Supervisor wrapper requires escalation_reason and question."
-    });
-  }
-
   let taskId = "";
   let messageId = "";
 
   try {
+    const taskPayload = buildDispatcherTaskPayload(context);
     const dispatchResponseRaw = await dispatcherClient.callTool("dispatch_role_task", {
       payload: taskPayload,
       shared_token: dispatcherToken
@@ -393,7 +567,7 @@ async function runSupervisorWrapperToolCall(
       throw new Error("Dispatcher did not return task_id.");
     }
 
-    const questionPayload = buildSupervisorQuestionPayload(input, taskId);
+    const questionPayload = buildSupervisorQuestionPayload(context, taskId);
     const questionResponseRaw = await dispatcherClient.callTool(
       "submit_supervisor_question",
       {
@@ -407,11 +581,10 @@ async function runSupervisorWrapperToolCall(
       throw new Error("Dispatcher did not return message_id.");
     }
 
-    const supervisorRequestPayload = buildSupervisorRequestPayload(input, taskId, now);
     const supervisorDecisionRaw = await supervisorClient.callTool(
       "ask_codex_supervisor",
       {
-        payload: supervisorRequestPayload,
+        payload: buildSupervisorRequestPayload(context),
         shared_token: supervisorToken
       }
     );
@@ -422,7 +595,7 @@ async function runSupervisorWrapperToolCall(
 
     const responseAckRaw = await dispatcherClient.callTool("respond_supervisor_question", {
       message_id: messageId,
-      supervisor_role_slug: taskPayload.supervisor_role_slug,
+      supervisor_role_slug: context.supervisorRoleSlug,
       decision_payload: supervisorDecision,
       shared_token: dispatcherToken
     });
@@ -437,7 +610,8 @@ async function runSupervisorWrapperToolCall(
         dispatch_status: asString(dispatchResponse.status || "queued"),
         question_status: asString(questionResponse.status || "pending"),
         response_status: asString(responseAck.status || "answered"),
-        submitted_at: isoUtcNow(now)
+        submitted_at: isoUtcNow(now),
+        role_source: asString(supervisionProfileSource) || "unknown"
       }
     });
   } catch (err) {
@@ -455,6 +629,8 @@ module.exports = {
   SUPERVISOR_WRAPPER_TOOL_NAME,
   INTERNAL_SUPERVISOR_TOOL_NAMES,
   getSupervisorWrapperOpenAiTool,
+  evaluateSupervisorEscalationGuardrails,
+  buildGuardrailBlockedWrapperResult,
   runSupervisorWrapperToolCall,
   buildGuardedSupervisorMessage
 };
