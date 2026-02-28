@@ -8,9 +8,13 @@ const { JoshGptSessionViewProvider } = require("./session-view-provider");
 const { McpHttpClient } = require("./mcp-client");
 const { runChatWithOptionalMcp } = require("./chat-runner");
 const { createLocalShellMirror } = require("./local-shell-mirror");
+const { resolveInheritedInstructions } = require("./instruction-resolver");
 
 const DEFAULT_MCP_BASE_URL = "http://127.0.0.1:8790/mcp";
 const DEFAULT_NATIVE_BASE_URL = "http://localhost:1234";
+const DEFAULT_SUPERVISOR_DISPATCHER_BASE_URL = "http://127.0.0.1:8788/mcp";
+const DEFAULT_SUPERVISOR_CAPABILITY_BASE_URL = "http://127.0.0.1:8789/mcp";
+const DEFAULT_INSTRUCTION_MAX_CHARS = 30000;
 const DEFAULT_LOCAL_SHELL_TERMINAL_NAME = "JoshGPT Local Shell";
 let runtimeLocalShellMirror = null;
 
@@ -46,6 +50,25 @@ function getConfig() {
     ),
     mcpTimeoutMs: Number(rootCfg.get("joshgpt.mcp.timeoutMs") || 15000),
     mcpMaxToolRounds: Number(rootCfg.get("joshgpt.mcp.maxToolRounds") || 4),
+    supervisorEnabled: Boolean(rootCfg.get("joshgpt.supervisor.enabled") ?? true),
+    supervisorDispatcherBaseUrl: normalizeBaseUrl(
+      String(
+        rootCfg.get("joshgpt.supervisor.dispatcherBaseUrl") ||
+          DEFAULT_SUPERVISOR_DISPATCHER_BASE_URL
+      )
+    ),
+    supervisorCapabilityBaseUrl: normalizeBaseUrl(
+      String(
+        rootCfg.get("joshgpt.supervisor.capabilityBaseUrl") ||
+          DEFAULT_SUPERVISOR_CAPABILITY_BASE_URL
+      )
+    ),
+    instructionsInheritVscodeInstructions: Boolean(
+      rootCfg.get("joshgpt.instructions.inheritVscodeInstructions") ?? true
+    ),
+    instructionsMaxChars: Number(
+      rootCfg.get("joshgpt.instructions.maxChars") || DEFAULT_INSTRUCTION_MAX_CHARS
+    ),
     localShellEnabled: Boolean(cfg.get("localShell.enabled") ?? true),
     localShellDefaultTimeoutSeconds: Number(
       cfg.get("localShell.defaultTimeoutSeconds") || 30
@@ -142,6 +165,17 @@ async function askModel(output) {
   }
 
   const modelMessages = [];
+  const instructionInheritance = resolveInheritedInstructions({
+    workspaceRoot: cfg.workspaceRoot,
+    enabled: cfg.instructionsInheritVscodeInstructions,
+    maxChars: cfg.instructionsMaxChars
+  });
+  if (instructionInheritance.applied && instructionInheritance.systemMessage) {
+    modelMessages.push({
+      role: "system",
+      content: instructionInheritance.systemMessage
+    });
+  }
   if (cfg.systemPrompt) {
     modelMessages.push({ role: "system", content: cfg.systemPrompt });
   }
@@ -161,6 +195,12 @@ async function askModel(output) {
     `[joshgpt] mcp=${cfg.mcpEnabled ? "enabled" : "disabled"} base=${cfg.mcpBaseUrl || "<unset>"}`
   );
   output.appendLine(
+    `[joshgpt] supervisor=${cfg.supervisorEnabled ? "enabled" : "disabled"} dispatcher=${cfg.supervisorDispatcherBaseUrl || "<unset>"} capability=${cfg.supervisorCapabilityBaseUrl || "<unset>"}`
+  );
+  output.appendLine(
+    `[joshgpt] inherited_instructions=${instructionInheritance.applied ? "applied" : "not-applied"} canonical=${instructionInheritance.canonicalAvailable ? "yes" : "no"} hash=${instructionInheritance.contentHash || "<none>"} truncated=${instructionInheritance.truncated ? "yes" : "no"}`
+  );
+  output.appendLine(
     `[joshgpt] local_shell=${cfg.localShellEnabled ? "enabled" : "disabled"}`
   );
   output.appendLine(
@@ -168,7 +208,10 @@ async function askModel(output) {
   );
 
   const { text } = await runChatWithOptionalMcp({
-    config: cfg,
+    config: {
+      ...cfg,
+      instructionInheritance
+    },
     messages: modelMessages,
     output
   });

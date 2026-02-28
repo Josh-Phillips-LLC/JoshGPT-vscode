@@ -142,6 +142,32 @@
           "maximum": 12,
           "description": "Maximum assistant tool-call rounds per prompt."
         },
+        "joshgpt.supervisor.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable extension-side Codex supervisor wrapper tool in openai-compat mode."
+        },
+        "joshgpt.supervisor.dispatcherBaseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8788/mcp",
+          "description": "Dispatcher MCP endpoint used by supervisor wrapper orchestration."
+        },
+        "joshgpt.supervisor.capabilityBaseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8789/mcp",
+          "description": "Supervisor capability MCP endpoint (ask_codex_supervisor)."
+        },
+        "joshgpt.instructions.inheritVscodeInstructions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inject inherited workspace instructions (canonical AGENTS first) into every model request."
+        },
+        "joshgpt.instructions.maxChars": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 1024,
+          "description": "Maximum characters allowed for inherited instruction context per request."
+        },
         "joshgpt.localShell.enabled": {
           "type": "boolean",
           "default": true,
@@ -195,6 +221,8 @@
     "test:local-shell": "node ./scripts/local-shell-self-test.js",
     "test:native": "node ./scripts/native-stream-self-test.js",
     "test:mcp": "node ./scripts/mcp-self-test.js",
+    "test:instructions": "node ./scripts/instruction-resolver-self-test.js",
+    "test:supervisor-wrapper": "node ./scripts/supervisor-wrapper-self-test.js",
     "package:vsix": "npx @vscode/vsce package --no-dependencies",
     "package:latest-vsix": "npx @vscode/vsce package --no-dependencies --out joshgpt-latest.vsix"
   },
