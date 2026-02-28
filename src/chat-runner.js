@@ -14,9 +14,13 @@ const {
   SUPERVISOR_WRAPPER_TOOL_NAME,
   INTERNAL_SUPERVISOR_TOOL_NAMES,
   getSupervisorWrapperOpenAiTool,
+  evaluateSupervisorEscalationGuardrails,
+  buildGuardrailBlockedWrapperResult,
   runSupervisorWrapperToolCall,
   buildGuardedSupervisorMessage
 } = require("./supervisor-wrapper-tool");
+const { resolveSupervisionProfile } = require("./supervision-profile-resolver");
+const { checkSupervisorReadiness } = require("./supervisor-readiness");
 
 const MCP_EXECUTION_TOOL_NAMES = new Set([
   "run_host_command",
@@ -181,6 +185,20 @@ function addInstructionTrace(addTrace, instructionInheritance) {
   }
 }
 
+function formatSupervisorCheckDetails(result, stage) {
+  return JSON.stringify(
+    {
+      stage: String(stage || ""),
+      status: String(result?.status || "blocked"),
+      ready: Boolean(result?.ready),
+      summary: String(result?.summary || ""),
+      checks: Array.isArray(result?.checks) ? result.checks : []
+    },
+    null,
+    2
+  );
+}
+
 async function runNativeStreamingMode({ config, messages, output, trace, addTrace }) {
   addTrace("start", "Prompt execution started (mode=lmstudio-native-stream).");
 
@@ -262,7 +280,41 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
   const localShellEnabled = Boolean(config.localShellEnabled);
   const localTools = localShellEnabled ? [getLocalShellOpenAiTool()] : [];
   const supervisorEnabled = Boolean(config.supervisorEnabled);
-  const supervisorTools = supervisorEnabled ? [getSupervisorWrapperOpenAiTool()] : [];
+  const supervisorModelEscalationEnabled = Boolean(
+    config.supervisorModelEscalationEnabled ?? true
+  );
+  const supervisorProfileResolution = supervisorEnabled
+    ? resolveSupervisionProfile({
+        workspaceRoot: config.workspaceRoot,
+        settingsFallback: {
+          workerRoleSlug: config.supervisorWorkerRoleSlug,
+          supervisorRoleSlug: config.supervisorSupervisorRoleSlug
+        }
+      })
+    : {
+        resolved: false,
+        source: "none",
+        profile: null,
+        warning: "",
+        error: ""
+      };
+  const supervisorTools =
+    supervisorEnabled && supervisorModelEscalationEnabled
+      ? [getSupervisorWrapperOpenAiTool()]
+      : [];
+  let supervisorPreflight = {
+    ready: false,
+    status: "blocked",
+    summary: "Supervisor readiness check not run.",
+    checks: []
+  };
+  let supervisorPreflightRechecked = false;
+  let supervisorGuardrailState = {
+    turnEscalationCount: 0,
+    sessionEscalationCount: Math.max(0, Number(config.supervisorEscalationsInSession) || 0),
+    lastEscalationAtMs: Math.max(0, Number(config.supervisorLastEscalationAtMs) || 0),
+    lastEscalationQuestionHash: String(config.supervisorLastEscalationQuestionHash || "")
+  };
 
   let mcpClient = null;
   let openAiTools = [];
@@ -272,6 +324,45 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
     "start",
     `Prompt execution started (mcp=${mcpEnabled ? "enabled" : "disabled"}, local_shell=${localShellEnabled ? "enabled" : "disabled"}, supervisor=${supervisorEnabled ? "enabled" : "disabled"})`
   );
+  if (supervisorEnabled) {
+    if (supervisorProfileResolution.resolved) {
+      addTrace(
+        "supervision-profile",
+        `Supervisor profile resolved from ${supervisorProfileResolution.source}.`,
+        JSON.stringify(
+          {
+            source: supervisorProfileResolution.source,
+            profile_file: supervisorProfileResolution.filePath || null,
+            worker_role_slug: supervisorProfileResolution.profile?.workerRoleSlug || "",
+            supervisor_role_slug:
+              supervisorProfileResolution.profile?.supervisorRoleSlug || ""
+          },
+          null,
+          2
+        )
+      );
+      if (supervisorProfileResolution.warning) {
+        addTrace("supervision-profile-warning", supervisorProfileResolution.warning);
+      }
+    } else {
+      addTrace(
+        "supervision-profile-error",
+        "Supervisor profile could not be resolved.",
+        String(supervisorProfileResolution.error || "")
+      );
+    }
+    supervisorPreflight = await checkSupervisorReadiness({
+      dispatcherBaseUrl: config.supervisorDispatcherBaseUrl,
+      capabilityBaseUrl: config.supervisorCapabilityBaseUrl,
+      timeoutMs: config.mcpTimeoutMs,
+      output
+    });
+    addTrace(
+      "supervisor-preflight",
+      `Supervisor readiness: ${supervisorPreflight.status}`,
+      formatSupervisorCheckDetails(supervisorPreflight, "session_start")
+    );
+  }
 
   if (mcpEnabled) {
     try {
@@ -282,7 +373,14 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       });
       const mcpTools = await mcpClient.listTools();
       const mcpOpenAiTools = asOpenAiTools(mcpTools, MCP_HIDDEN_TOOL_NAMES);
-      openAiTools = [...localTools, ...supervisorTools, ...mcpOpenAiTools];
+      const supervisorToolsForTurn =
+        supervisorEnabled &&
+        supervisorModelEscalationEnabled &&
+        supervisorProfileResolution.resolved &&
+        supervisorPreflight.ready
+          ? supervisorTools
+          : [];
+      openAiTools = [...localTools, ...supervisorToolsForTurn, ...mcpOpenAiTools];
       if (!openAiTools.length) {
         addTrace("mcp", "MCP connected but no tools were returned.");
         mcpEnabled = false;
@@ -303,7 +401,14 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       addTrace("mcp", "MCP disabled for this turn.", msg);
       mcpEnabled = false;
       if (localShellEnabled || supervisorEnabled) {
-        openAiTools = [...localTools, ...supervisorTools];
+        const supervisorToolsForTurn =
+          supervisorEnabled &&
+          supervisorModelEscalationEnabled &&
+          supervisorProfileResolution.resolved &&
+          supervisorPreflight.ready
+            ? supervisorTools
+            : [];
+        openAiTools = [...localTools, ...supervisorToolsForTurn];
         if (output) {
           output.appendLine(
             "[joshgpt] Falling back to extension-local tools for this turn."
@@ -313,7 +418,14 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       }
     }
   } else if (localShellEnabled || supervisorEnabled) {
-    openAiTools = [...localTools, ...supervisorTools];
+    const supervisorToolsForTurn =
+      supervisorEnabled &&
+      supervisorModelEscalationEnabled &&
+      supervisorProfileResolution.resolved &&
+      supervisorPreflight.ready
+        ? supervisorTools
+        : [];
+    openAiTools = [...localTools, ...supervisorToolsForTurn];
     addTrace("tool", "MCP disabled; extension-local tools are active.");
   }
 
@@ -326,15 +438,31 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       addTrace("tool", "Ensured local shell tool availability for this turn.");
     }
   }
-  if (supervisorEnabled) {
+  if (supervisorEnabled && supervisorModelEscalationEnabled) {
+    if (!supervisorProfileResolution.resolved) {
+      addTrace(
+        "supervisor",
+        "Supervisor wrapper tool withheld: unresolved supervision profile."
+      );
+    } else if (!supervisorPreflight.ready) {
+      addTrace(
+        "supervisor",
+        "Supervisor wrapper tool withheld: readiness preflight is blocked."
+      );
+    }
     const hasSupervisorTool = openAiTools.some(
       (tool) =>
         tool && tool.function && tool.function.name === SUPERVISOR_WRAPPER_TOOL_NAME
     );
-    if (!hasSupervisorTool) {
+    if (!hasSupervisorTool && supervisorProfileResolution.resolved && supervisorPreflight.ready) {
       openAiTools = [...supervisorTools, ...openAiTools];
       addTrace("tool", "Ensured supervisor wrapper tool availability for this turn.");
     }
+  } else if (supervisorEnabled) {
+    addTrace(
+      "supervisor",
+      "Model-initiated supervisor escalation disabled by configuration."
+    );
   }
 
   const workingMessages = Array.isArray(messages) ? [...messages] : [];
@@ -372,6 +500,7 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
         text: response.text,
         usedTools: usedToolsInTurn,
         rounds: round + 1,
+        supervisorGuardrailState,
         trace
       };
     }
@@ -428,17 +557,66 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
           addTrace("tool-error", `Local shell failed: ${toolName}`, msg);
         }
       } else if (toolName === SUPERVISOR_WRAPPER_TOOL_NAME) {
-        const wrapperResult = await runSupervisorWrapperToolCall(args, {
-          dispatcherBaseUrl: config.supervisorDispatcherBaseUrl,
-          capabilityBaseUrl: config.supervisorCapabilityBaseUrl,
-          timeoutMs: config.mcpTimeoutMs,
-          output
-        });
-        toolResultText = JSON.stringify(wrapperResult, null, 2);
         addTrace(
-          "supervisor",
+          "supervisor-escalation-request",
+          "Supervisor escalation requested by model.",
+          JSON.stringify(args, null, 2).slice(0, 1200)
+        );
+        if (!supervisorPreflightRechecked) {
+          supervisorPreflightRechecked = true;
+          supervisorPreflight = await checkSupervisorReadiness({
+            dispatcherBaseUrl: config.supervisorDispatcherBaseUrl,
+            capabilityBaseUrl: config.supervisorCapabilityBaseUrl,
+            timeoutMs: config.mcpTimeoutMs,
+            output
+          });
+          addTrace(
+            "supervisor-preflight",
+            `Supervisor readiness: ${supervisorPreflight.status}`,
+            formatSupervisorCheckDetails(supervisorPreflight, "before_first_escalation")
+          );
+        }
+        const guardrailEval = evaluateSupervisorEscalationGuardrails({
+          input: args,
+          state: supervisorGuardrailState,
+          policy: {
+            maxPerTurn: config.supervisorMaxEscalationsPerTurn,
+            maxPerSession: config.supervisorMaxEscalationsPerSession,
+            cooldownMs: config.supervisorEscalationCooldownMs
+          }
+        });
+        let wrapperResult;
+        if (!supervisorProfileResolution.resolved) {
+          wrapperResult = buildGuardrailBlockedWrapperResult(
+            `Missing supervision profile: ${supervisorProfileResolution.error || "role binding unavailable."}`
+          );
+        } else if (!supervisorPreflight.ready) {
+          wrapperResult = buildGuardrailBlockedWrapperResult(
+            `Supervisor preflight blocked: ${supervisorPreflight.summary}`
+          );
+        } else if (!guardrailEval.allowed) {
+          wrapperResult = buildGuardrailBlockedWrapperResult(guardrailEval.reason);
+        } else {
+          supervisorGuardrailState = guardrailEval.state;
+          wrapperResult = await runSupervisorWrapperToolCall(args, {
+            dispatcherBaseUrl: config.supervisorDispatcherBaseUrl,
+            capabilityBaseUrl: config.supervisorCapabilityBaseUrl,
+            timeoutMs: config.mcpTimeoutMs,
+            output,
+            supervisionProfile: supervisorProfileResolution.profile,
+            supervisionProfileSource: supervisorProfileResolution.source,
+            sessionContext: config.supervisorSessionContext || {}
+          });
+        }
+        toolResultText = JSON.stringify(wrapperResult, null, 2);
+        const supervisorTracePayload = {
+          wrapper_result: wrapperResult,
+          guardrail_state: supervisorGuardrailState
+        };
+        addTrace(
+          "supervisor-escalation-decision",
           `Supervisor wrapper result: action=${wrapperResult.action}`,
-          toolResultText.slice(0, 1200)
+          JSON.stringify(supervisorTracePayload, null, 2).slice(0, 1200)
         );
         if (wrapperResult.action === "terminate") {
           addTrace(
@@ -449,6 +627,7 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
             text: buildGuardedSupervisorMessage(wrapperResult),
             usedTools: true,
             rounds: round + 1,
+            supervisorGuardrailState,
             trace
           };
         }
@@ -490,6 +669,7 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       "Reached tool-call round limit before final response. Increase joshgpt.mcp.maxToolRounds if needed.",
     usedTools: true,
     rounds: maxRounds,
+    supervisorGuardrailState,
     trace
   };
 }

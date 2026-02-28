@@ -4,6 +4,14 @@ const vscode = require("vscode");
 const { SessionStore } = require("./session-store");
 const { runChatWithOptionalMcp } = require("./chat-runner");
 const { resolveInheritedInstructions } = require("./instruction-resolver");
+const { resolveSupervisionProfile } = require("./supervision-profile-resolver");
+const { checkSupervisorReadiness } = require("./supervisor-readiness");
+const {
+  runSupervisorWrapperToolCall,
+  evaluateSupervisorEscalationGuardrails,
+  buildGuardrailBlockedWrapperResult,
+  buildGuardedSupervisorMessage
+} = require("./supervisor-wrapper-tool");
 
 const SETTINGS_EXTENSION_ID = "josh-phillips-llc.joshgpt";
 const SETTINGS_FIELDS = [
@@ -20,8 +28,14 @@ const SETTINGS_FIELDS = [
   { key: "mcp.timeoutMs", type: "number", min: 1000 },
   { key: "mcp.maxToolRounds", type: "number", min: 1, max: 12 },
   { key: "supervisor.enabled", type: "boolean" },
+  { key: "supervisor.modelEscalationEnabled", type: "boolean" },
   { key: "supervisor.dispatcherBaseUrl", type: "string" },
   { key: "supervisor.capabilityBaseUrl", type: "string" },
+  { key: "supervisor.maxEscalationsPerTurn", type: "number", min: 1 },
+  { key: "supervisor.maxEscalationsPerSession", type: "number", min: 1 },
+  { key: "supervisor.escalationCooldownMs", type: "number", min: 0 },
+  { key: "supervisor.workerRoleSlug", type: "string" },
+  { key: "supervisor.supervisorRoleSlug", type: "string" },
   { key: "instructions.inheritVscodeInstructions", type: "boolean" },
   { key: "instructions.maxChars", type: "number", min: 1024 },
   { key: "localShell.enabled", type: "boolean" },
@@ -33,6 +47,133 @@ const SETTINGS_FIELDS = [
   { key: "localShell.mirrorTerminalName", type: "string" },
   { key: "localShell.mirrorTerminalReveal", type: "boolean" }
 ];
+
+function asString(value) {
+  return String(value || "").trim();
+}
+
+function safeJsonParseObject(text) {
+  try {
+    const parsed = JSON.parse(String(text || ""));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // Ignore invalid JSON in trace details.
+  }
+  return null;
+}
+
+function normalizeOneLine(text, maxChars = 260) {
+  const normalized = asString(text).replace(/\s+/g, " ");
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxChars)}...`;
+}
+
+function deriveLatestAssistantEvidence(session) {
+  const messages = Array.isArray(session && session.messages) ? session.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const item = messages[i];
+    if (item && item.role === "assistant" && asString(item.content)) {
+      return normalizeOneLine(item.content, 600);
+    }
+  }
+  return "";
+}
+
+function deriveAttemptHistory(session, maxItems = 8) {
+  const events = Array.isArray(session && session.traceEvents) ? session.traceEvents : [];
+  const out = [];
+  for (let i = events.length - 1; i >= 0 && out.length < maxItems; i -= 1) {
+    const event = events[i];
+    const summary = normalizeOneLine(event && event.summary, 160);
+    if (!summary) {
+      continue;
+    }
+    out.push(summary);
+  }
+  return out.reverse();
+}
+
+function deriveObjective(session, promptFallback = "") {
+  const prompt = normalizeOneLine(promptFallback, 260);
+  if (prompt) {
+    return prompt;
+  }
+  const messages = Array.isArray(session && session.messages) ? session.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const item = messages[i];
+    if (item && item.role === "user" && asString(item.content)) {
+      return normalizeOneLine(item.content, 260);
+    }
+  }
+  return "Resolve the active workspace blocker safely.";
+}
+
+function deriveGuardrailSeed(session) {
+  const events = Array.isArray(session && session.traceEvents) ? session.traceEvents : [];
+  let sessionEscalationsInSession = 0;
+  let lastEscalationAtMs = 0;
+  let lastEscalationQuestionHash = "";
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i];
+    if (!event || String(event.type || "") !== "supervisor-escalation-decision") {
+      continue;
+    }
+    sessionEscalationsInSession += 1;
+    const eventTime = Date.parse(String(event.timestamp || ""));
+    if (Number.isFinite(eventTime)) {
+      lastEscalationAtMs = Math.max(lastEscalationAtMs, eventTime);
+    }
+    const parsed = safeJsonParseObject(event.details);
+    const guardrailState =
+      parsed &&
+      parsed.guardrail_state &&
+      typeof parsed.guardrail_state === "object"
+        ? parsed.guardrail_state
+        : null;
+    if (guardrailState) {
+      const parsedAt = Number(guardrailState.lastEscalationAtMs);
+      if (Number.isFinite(parsedAt)) {
+        lastEscalationAtMs = Math.max(lastEscalationAtMs, parsedAt);
+      }
+      const parsedHash = asString(guardrailState.lastEscalationQuestionHash);
+      if (parsedHash) {
+        lastEscalationQuestionHash = parsedHash;
+      }
+    }
+  }
+  return {
+    sessionEscalationsInSession,
+    lastEscalationAtMs,
+    lastEscalationQuestionHash
+  };
+}
+
+function formatSupervisorDecisionMessage(wrapperResult) {
+  const decision =
+    wrapperResult && wrapperResult.decision && typeof wrapperResult.decision === "object"
+      ? wrapperResult.decision
+      : {};
+  if (wrapperResult && wrapperResult.action === "terminate") {
+    return buildGuardedSupervisorMessage(wrapperResult);
+  }
+  const lines = [];
+  lines.push(`Supervisor decision: ${asString(decision.decision) || "proceed"}`);
+  if (asString(decision.rationale)) {
+    lines.push(`Rationale: ${asString(decision.rationale)}`);
+  }
+  lines.push(`Terminal: ${Boolean(wrapperResult && wrapperResult.terminal)}`);
+  const nextActions = Array.isArray(decision.next_actions) ? decision.next_actions : [];
+  let idx = 1;
+  for (const action of nextActions) {
+    lines.push(`Next action ${idx}: ${String(action)}`);
+    idx += 1;
+  }
+  return lines.join("\n");
+}
 
 function makeNonce() {
   const chars =
@@ -112,6 +253,10 @@ class JoshGptSessionViewProvider {
   async createSessionFromCommand() {
     await this.store.createSession();
     await this._postState();
+  }
+
+  async escalateActiveSessionFromCommand() {
+    await this._escalateToSupervisor();
   }
 
   _settingsConfig() {
@@ -218,6 +363,11 @@ class JoshGptSessionViewProvider {
       return;
     }
 
+    if (type === "escalateToSupervisor") {
+      await this._escalateToSupervisor();
+      return;
+    }
+
     if (type === "reloadSettings") {
       await this._postState();
       return;
@@ -270,6 +420,17 @@ class JoshGptSessionViewProvider {
         enabled: cfg.instructionsInheritVscodeInstructions,
         maxChars: cfg.instructionsMaxChars
       });
+      const objective = deriveObjective(latestSession, prompt);
+      const guardrailSeed = deriveGuardrailSeed(latestSession);
+      const supervisorSessionContext = {
+        objective,
+        roleContextRef: instructionInheritance.canonicalPath || "workspace://AGENTS.md",
+        attemptHistory: deriveAttemptHistory(latestSession, 8),
+        evidenceSummary: deriveLatestAssistantEvidence(latestSession),
+        blockedReason: "insufficient_context",
+        currentPhase: "validation",
+        requestedDecision: "next_step"
+      };
 
       const modelMessages = [];
       if (instructionInheritance.applied && instructionInheritance.systemMessage) {
@@ -298,7 +459,11 @@ class JoshGptSessionViewProvider {
       const { text, trace } = await runChatWithOptionalMcp({
         config: {
           ...cfg,
-          instructionInheritance
+          instructionInheritance,
+          supervisorSessionContext,
+          supervisorEscalationsInSession: guardrailSeed.sessionEscalationsInSession,
+          supervisorLastEscalationAtMs: guardrailSeed.lastEscalationAtMs,
+          supervisorLastEscalationQuestionHash: guardrailSeed.lastEscalationQuestionHash
         },
         messages: modelMessages,
         output: this.output
@@ -323,6 +488,203 @@ class JoshGptSessionViewProvider {
       ]);
       this.output.appendLine(`[joshgpt] session completion error: ${msg}`);
       vscode.window.showErrorMessage(msg);
+    } finally {
+      this.busy = false;
+      await this._postState();
+    }
+  }
+
+  async _escalateToSupervisor() {
+    if (this.busy) {
+      vscode.window.showInformationMessage("JoshGPT is busy. Wait for current run to finish.");
+      return;
+    }
+    this.busy = true;
+    await this._postState();
+    try {
+      const activeSession = await this.store.ensureActiveSession();
+      const session = this.store.getSessionById(activeSession.id);
+      if (!session) {
+        throw new Error("Active session not found.");
+      }
+
+      const cfg = this.getConfig();
+      if (!cfg.supervisorEnabled) {
+        throw new Error("Supervisor is disabled (joshgpt.supervisor.enabled=false).");
+      }
+
+      const question = asString(
+        await vscode.window.showInputBox({
+          title: "Escalate to Supervisor",
+          placeHolder: "Describe what decision you need from supervisor.",
+          prompt: "Enter a focused escalation question.",
+          ignoreFocusOut: true
+        })
+      );
+      if (!question) {
+        return;
+      }
+
+      const reasonChoice = await vscode.window.showQuickPick(
+        [
+          { label: "Need next step", value: "insufficient_context" },
+          { label: "Tool error", value: "tool_error" },
+          { label: "Ambiguous result", value: "ambiguous_result" },
+          { label: "Policy conflict", value: "policy_conflict" },
+          { label: "Repeated failure", value: "repeated_failure" }
+        ],
+        {
+          title: "Escalation reason",
+          placeHolder: "Select the closest reason."
+        }
+      );
+      if (!reasonChoice) {
+        return;
+      }
+
+    const instructionInheritance = resolveInheritedInstructions({
+      workspaceRoot: cfg.workspaceRoot,
+      enabled: cfg.instructionsInheritVscodeInstructions,
+      maxChars: cfg.instructionsMaxChars
+    });
+    const profile = resolveSupervisionProfile({
+      workspaceRoot: cfg.workspaceRoot,
+      settingsFallback: {
+        workerRoleSlug: cfg.supervisorWorkerRoleSlug,
+        supervisorRoleSlug: cfg.supervisorSupervisorRoleSlug
+      }
+    });
+    const readiness = await checkSupervisorReadiness({
+      dispatcherBaseUrl: cfg.supervisorDispatcherBaseUrl,
+      capabilityBaseUrl: cfg.supervisorCapabilityBaseUrl,
+      timeoutMs: cfg.mcpTimeoutMs,
+      output: this.output
+    });
+
+    const guardrailSeed = deriveGuardrailSeed(session);
+    const guardrailEval = evaluateSupervisorEscalationGuardrails({
+      input: { question },
+      state: {
+        turnEscalationCount: 0,
+        sessionEscalationCount: guardrailSeed.sessionEscalationsInSession,
+        lastEscalationAtMs: guardrailSeed.lastEscalationAtMs,
+        lastEscalationQuestionHash: guardrailSeed.lastEscalationQuestionHash
+      },
+      policy: {
+        maxPerTurn: cfg.supervisorMaxEscalationsPerTurn,
+        maxPerSession: cfg.supervisorMaxEscalationsPerSession,
+        cooldownMs: cfg.supervisorEscalationCooldownMs
+      }
+    });
+
+    const supervisorSessionContext = {
+      objective: deriveObjective(session, question),
+      roleContextRef: instructionInheritance.canonicalPath || "workspace://AGENTS.md",
+      attemptHistory: deriveAttemptHistory(session, 8),
+      evidenceSummary: deriveLatestAssistantEvidence(session),
+      blockedReason: reasonChoice.value,
+      currentPhase: "validation",
+      requestedDecision: "next_step"
+    };
+
+    let wrapperResult;
+    if (!profile.resolved) {
+      wrapperResult = buildGuardrailBlockedWrapperResult(
+        `Missing supervision profile: ${profile.error || "role binding unavailable."}`
+      );
+    } else if (!readiness.ready) {
+      wrapperResult = buildGuardrailBlockedWrapperResult(
+        `Supervisor preflight blocked: ${readiness.summary}`
+      );
+    } else if (!guardrailEval.allowed) {
+      wrapperResult = buildGuardrailBlockedWrapperResult(guardrailEval.reason);
+    } else {
+      wrapperResult = await runSupervisorWrapperToolCall(
+        {
+          question,
+          escalation_reason: "manual_user_request",
+          blocked_reason: reasonChoice.value
+        },
+        {
+          dispatcherBaseUrl: cfg.supervisorDispatcherBaseUrl,
+          capabilityBaseUrl: cfg.supervisorCapabilityBaseUrl,
+          timeoutMs: cfg.mcpTimeoutMs,
+          output: this.output,
+          supervisionProfile: profile.profile,
+          supervisionProfileSource: profile.source,
+          sessionContext: supervisorSessionContext
+        }
+      );
+    }
+
+    const trace = [
+      {
+        timestamp: new Date().toISOString(),
+        type: "supervisor-preflight",
+        summary: `Supervisor readiness: ${readiness.status}`,
+        details: JSON.stringify(
+          {
+            status: readiness.status,
+            summary: readiness.summary,
+            checks: readiness.checks
+          },
+          null,
+          2
+        )
+      },
+      {
+        timestamp: new Date().toISOString(),
+        type: "supervision-profile",
+        summary: profile.resolved
+          ? `Supervisor profile resolved from ${profile.source}.`
+          : "Supervisor profile unresolved.",
+        details: JSON.stringify(
+          {
+            source: profile.source,
+            resolved: profile.resolved,
+            error: profile.error || "",
+            warning: profile.warning || "",
+            filePath: profile.filePath || null
+          },
+          null,
+          2
+        )
+      },
+      {
+        timestamp: new Date().toISOString(),
+        type: "supervisor-escalation-request",
+        summary: "Manual escalation submitted.",
+        details: JSON.stringify(
+          {
+            question,
+            blocked_reason: reasonChoice.value
+          },
+          null,
+          2
+        )
+      },
+      {
+        timestamp: new Date().toISOString(),
+        type: "supervisor-escalation-decision",
+        summary: `Supervisor wrapper result: action=${wrapperResult.action}`,
+        details: JSON.stringify(
+          {
+            wrapper_result: wrapperResult,
+            guardrail_state: guardrailEval.state
+          },
+          null,
+          2
+        )
+      }
+    ];
+
+      await this.store.appendMessage(
+        activeSession.id,
+        "assistant",
+        formatSupervisorDecisionMessage(wrapperResult)
+      );
+      await this.store.appendTraceEvents(activeSession.id, trace);
+      await this._postState();
     } finally {
       this.busy = false;
       await this._postState();
@@ -644,6 +1006,7 @@ class JoshGptSessionViewProvider {
         <div id="chatTitle" class="chat-title">No active session</div>
         <div class="chat-actions">
           <button id="toggleSessionsBtn" class="secondary">Show Sessions</button>
+          <button id="escalateBtn" class="secondary">Escalate</button>
           <button id="deleteSessionBtn" class="secondary">Delete</button>
         </div>
       </div>
@@ -689,6 +1052,7 @@ class JoshGptSessionViewProvider {
     const titleEl = document.getElementById("chatTitle");
     const messagesEl = document.getElementById("messages");
     const sendBtn = document.getElementById("sendBtn");
+    const escalateBtn = document.getElementById("escalateBtn");
     const promptInput = document.getElementById("promptInput");
     const toggleSessionsBtn = document.getElementById("toggleSessionsBtn");
     const deleteBtn = document.getElementById("deleteSessionBtn");
@@ -755,11 +1119,13 @@ class JoshGptSessionViewProvider {
         messagesEl.appendChild(empty);
         titleEl.textContent = "No active session";
         deleteBtn.disabled = true;
+        escalateBtn.disabled = true;
         return;
       }
 
       titleEl.textContent = active.title || "Untitled Session";
       deleteBtn.disabled = false;
+      escalateBtn.disabled = false;
 
       if (!active.messages.length) {
         const empty = document.createElement("div");
@@ -860,6 +1226,9 @@ class JoshGptSessionViewProvider {
       sendBtn.disabled = state.busy;
       sendBtn.textContent = state.busy ? "Sending..." : "Send";
       promptInput.disabled = state.busy;
+      if (state.busy) {
+        escalateBtn.disabled = true;
+      }
     }
 
     function renderSettings(force) {
@@ -902,6 +1271,13 @@ class JoshGptSessionViewProvider {
       const active = activeSession();
       if (!active) return;
       vscode.postMessage({ type: "deleteSession", sessionId: active.id });
+    });
+
+    escalateBtn.addEventListener("click", () => {
+      if (state.busy) return;
+      const active = activeSession();
+      if (!active) return;
+      vscode.postMessage({ type: "escalateToSupervisor" });
     });
 
     toggleSessionsBtn.addEventListener("click", () => {

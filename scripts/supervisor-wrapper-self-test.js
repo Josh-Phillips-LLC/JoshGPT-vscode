@@ -4,15 +4,21 @@
 const assert = require("assert");
 const {
   runSupervisorWrapperToolCall,
-  buildGuardedSupervisorMessage
+  buildGuardedSupervisorMessage,
+  evaluateSupervisorEscalationGuardrails
 } = require("../src/supervisor-wrapper-tool");
 
 const DEFAULT_INPUT = {
-  worker_role_slug: "worker-analyst",
-  supervisor_role_slug: "codex-supervisor",
-  objective: "Confirm escalation behavior.",
   escalation_reason: "insufficient_context",
   question: "Should we proceed with current evidence?"
+};
+
+const DEFAULT_PROFILE = {
+  workerRoleSlug: "worker-analyst",
+  supervisorRoleSlug: "codex-supervisor",
+  authorizedScopeId: "extension-supervisor-scope",
+  authorizedTargets: ["workspace"],
+  requestedDecisionDefault: "next_step"
 };
 
 function createClientFactory({
@@ -55,6 +61,12 @@ async function testHappyPath() {
       JOSHGPT_DISPATCHER_SHARED_TOKEN: "dispatcher-token",
       JOSHGPT_SUPERVISOR_SHARED_TOKEN: "supervisor-token"
     },
+    supervisionProfile: DEFAULT_PROFILE,
+    supervisionProfileSource: "workspace_file",
+    sessionContext: {
+      objective: "Confirm escalation behavior.",
+      roleContextRef: "workspace://AGENTS.md"
+    },
     mcpClientFactory: createClientFactory({
       dispatcherHandlers: {
         dispatch_role_task: () => ({ structuredContent: { task_id: "task-1", status: "queued" } }),
@@ -83,7 +95,8 @@ async function testMissingEnvToken() {
     capabilityBaseUrl: "http://127.0.0.1:8789/mcp",
     env: {
       JOSHGPT_DISPATCHER_SHARED_TOKEN: "dispatcher-token"
-    }
+    },
+    supervisionProfile: DEFAULT_PROFILE
   });
 
   assert.strictEqual(result.ok, false);
@@ -98,6 +111,11 @@ async function testDispatcherFailure() {
     env: {
       JOSHGPT_DISPATCHER_SHARED_TOKEN: "dispatcher-token",
       JOSHGPT_SUPERVISOR_SHARED_TOKEN: "supervisor-token"
+    },
+    supervisionProfile: DEFAULT_PROFILE,
+    sessionContext: {
+      objective: "Confirm escalation behavior.",
+      roleContextRef: "workspace://AGENTS.md"
     },
     mcpClientFactory: createClientFactory({
       dispatcherHandlers: {
@@ -123,6 +141,11 @@ async function testFailSafeDecisionPropagation() {
       JOSHGPT_DISPATCHER_SHARED_TOKEN: "dispatcher-token",
       JOSHGPT_SUPERVISOR_SHARED_TOKEN: "supervisor-token"
     },
+    supervisionProfile: DEFAULT_PROFILE,
+    sessionContext: {
+      objective: "Confirm escalation behavior.",
+      roleContextRef: "workspace://AGENTS.md"
+    },
     mcpClientFactory: createClientFactory({
       dispatcherHandlers: {
         dispatch_role_task: () => ({ structuredContent: { task_id: "task-2", status: "queued" } }),
@@ -144,11 +167,32 @@ async function testFailSafeDecisionPropagation() {
   assert.ok(guarded.includes("pause_for_human"));
 }
 
+function testGuardrailPolicy() {
+  const first = evaluateSupervisorEscalationGuardrails({
+    input: { question: "Need next step" },
+    state: { turnEscalationCount: 0, sessionEscalationCount: 0 },
+    policy: { maxPerTurn: 1, maxPerSession: 2, cooldownMs: 15000 },
+    nowMs: 1000
+  });
+  assert.strictEqual(first.allowed, true);
+  assert.strictEqual(first.state.turnEscalationCount, 1);
+
+  const second = evaluateSupervisorEscalationGuardrails({
+    input: { question: "Need next step" },
+    state: first.state,
+    policy: { maxPerTurn: 1, maxPerSession: 2, cooldownMs: 15000 },
+    nowMs: 2000
+  });
+  assert.strictEqual(second.allowed, false);
+  assert.ok(second.reason.includes("per-turn limit"));
+}
+
 async function main() {
   await testHappyPath();
   await testMissingEnvToken();
   await testDispatcherFailure();
   await testFailSafeDecisionPropagation();
+  testGuardrailPolicy();
   console.log("[supervisor-wrapper-test] PASS");
 }
 

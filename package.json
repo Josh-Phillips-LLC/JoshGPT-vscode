@@ -29,7 +29,9 @@
     "onCommand:joshgpt.newSession",
     "onCommand:joshgpt.listModels",
     "onCommand:joshgpt.askModel",
-    "onCommand:joshgpt.mcpStatus"
+    "onCommand:joshgpt.mcpStatus",
+    "onCommand:joshgpt.checkSupervisorStatus",
+    "onCommand:joshgpt.escalateToSupervisor"
   ],
   "main": "./src/extension.js",
   "contributes": {
@@ -49,6 +51,14 @@
       {
         "command": "joshgpt.mcpStatus",
         "title": "JoshGPT: MCP Status"
+      },
+      {
+        "command": "joshgpt.checkSupervisorStatus",
+        "title": "JoshGPT: Check Supervisor Status"
+      },
+      {
+        "command": "joshgpt.escalateToSupervisor",
+        "title": "JoshGPT: Escalate To Supervisor"
       }
     ],
     "viewsContainers": {
@@ -147,6 +157,11 @@
           "default": true,
           "description": "Enable extension-side Codex supervisor wrapper tool in openai-compat mode."
         },
+        "joshgpt.supervisor.modelEscalationEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the model to initiate supervisor escalation via request_codex_supervisor_decision."
+        },
         "joshgpt.supervisor.dispatcherBaseUrl": {
           "type": "string",
           "default": "http://127.0.0.1:8788/mcp",
@@ -156,6 +171,34 @@
           "type": "string",
           "default": "http://127.0.0.1:8789/mcp",
           "description": "Supervisor capability MCP endpoint (ask_codex_supervisor)."
+        },
+        "joshgpt.supervisor.maxEscalationsPerTurn": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "description": "Guardrail: maximum supervisor escalations allowed per prompt turn."
+        },
+        "joshgpt.supervisor.maxEscalationsPerSession": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "description": "Guardrail: maximum supervisor escalations allowed per session."
+        },
+        "joshgpt.supervisor.escalationCooldownMs": {
+          "type": "number",
+          "default": 15000,
+          "minimum": 0,
+          "description": "Guardrail: minimum cooldown interval between supervisor escalations."
+        },
+        "joshgpt.supervisor.workerRoleSlug": {
+          "type": "string",
+          "default": "",
+          "description": "Fallback worker role slug used when .joshgpt/supervision.json is missing."
+        },
+        "joshgpt.supervisor.supervisorRoleSlug": {
+          "type": "string",
+          "default": "",
+          "description": "Fallback supervisor role slug used when .joshgpt/supervision.json is missing."
         },
         "joshgpt.instructions.inheritVscodeInstructions": {
           "type": "boolean",
@@ -222,6 +265,8 @@
     "test:native": "node ./scripts/native-stream-self-test.js",
     "test:mcp": "node ./scripts/mcp-self-test.js",
     "test:instructions": "node ./scripts/instruction-resolver-self-test.js",
+    "test:supervision-profile": "node ./scripts/supervision-profile-self-test.js",
+    "test:supervisor-readiness": "node ./scripts/supervisor-readiness-self-test.js",
     "test:supervisor-wrapper": "node ./scripts/supervisor-wrapper-self-test.js",
     "package:vsix": "npx @vscode/vsce package --no-dependencies",
     "package:latest-vsix": "npx @vscode/vsce package --no-dependencies --out joshgpt-latest.vsix"
