@@ -10,10 +10,21 @@ const {
   getLocalShellOpenAiTool,
   runLocalShellToolCall
 } = require("./local-shell-tool");
+const {
+  SUPERVISOR_WRAPPER_TOOL_NAME,
+  INTERNAL_SUPERVISOR_TOOL_NAMES,
+  getSupervisorWrapperOpenAiTool,
+  runSupervisorWrapperToolCall,
+  buildGuardedSupervisorMessage
+} = require("./supervisor-wrapper-tool");
 
 const MCP_EXECUTION_TOOL_NAMES = new Set([
   "run_host_command",
   "run_container_command"
+]);
+const MCP_HIDDEN_TOOL_NAMES = new Set([
+  ...MCP_EXECUTION_TOOL_NAMES,
+  ...INTERNAL_SUPERVISOR_TOOL_NAMES
 ]);
 
 function stringifyToolResult(result) {
@@ -130,6 +141,46 @@ function summarizeEventData(data) {
   }
 }
 
+function formatInstructionTraceDetails(instructionInheritance) {
+  const sources = Array.isArray(instructionInheritance?.selectedSources)
+    ? instructionInheritance.selectedSources
+    : [];
+  const chosenCanonicalSource = instructionInheritance?.canonicalAvailable
+    ? String(instructionInheritance.canonicalPath || "")
+    : "";
+  const fallbackPathUsed =
+    !instructionInheritance?.canonicalAvailable && sources.length > 0
+      ? String(sources[0].path || "")
+      : "";
+  return JSON.stringify(
+    {
+      chosen_canonical_source: chosenCanonicalSource || null,
+      fallback_path_used: fallbackPathUsed || null,
+      truncated: Boolean(instructionInheritance?.truncated),
+      content_hash: String(instructionInheritance?.contentHash || ""),
+      source_count: sources.length
+    },
+    null,
+    2
+  );
+}
+
+function addInstructionTrace(addTrace, instructionInheritance) {
+  if (!instructionInheritance || typeof instructionInheritance !== "object") {
+    return;
+  }
+  addTrace(
+    "instructions",
+    instructionInheritance.applied
+      ? "Inherited workspace instructions applied."
+      : "Inherited workspace instructions not applied.",
+    formatInstructionTraceDetails(instructionInheritance)
+  );
+  if (instructionInheritance.warning) {
+    addTrace("instructions-warning", String(instructionInheritance.warning));
+  }
+}
+
 async function runNativeStreamingMode({ config, messages, output, trace, addTrace }) {
   addTrace("start", "Prompt execution started (mode=lmstudio-native-stream).");
 
@@ -198,6 +249,7 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
   }
 
   if (config.chatEndpointMode === "lmstudio-native-stream") {
+    addInstructionTrace(addTrace, config.instructionInheritance);
     return runNativeStreamingMode({
       config,
       messages,
@@ -209,13 +261,16 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
 
   const localShellEnabled = Boolean(config.localShellEnabled);
   const localTools = localShellEnabled ? [getLocalShellOpenAiTool()] : [];
+  const supervisorEnabled = Boolean(config.supervisorEnabled);
+  const supervisorTools = supervisorEnabled ? [getSupervisorWrapperOpenAiTool()] : [];
 
   let mcpClient = null;
   let openAiTools = [];
   let mcpEnabled = Boolean(config.mcpEnabled);
+  addInstructionTrace(addTrace, config.instructionInheritance);
   addTrace(
     "start",
-    `Prompt execution started (mcp=${mcpEnabled ? "enabled" : "disabled"}, local_shell=${localShellEnabled ? "enabled" : "disabled"})`
+    `Prompt execution started (mcp=${mcpEnabled ? "enabled" : "disabled"}, local_shell=${localShellEnabled ? "enabled" : "disabled"}, supervisor=${supervisorEnabled ? "enabled" : "disabled"})`
   );
 
   if (mcpEnabled) {
@@ -226,8 +281,8 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
         output
       });
       const mcpTools = await mcpClient.listTools();
-      const mcpOpenAiTools = asOpenAiTools(mcpTools, MCP_EXECUTION_TOOL_NAMES);
-      openAiTools = [...localTools, ...mcpOpenAiTools];
+      const mcpOpenAiTools = asOpenAiTools(mcpTools, MCP_HIDDEN_TOOL_NAMES);
+      openAiTools = [...localTools, ...supervisorTools, ...mcpOpenAiTools];
       if (!openAiTools.length) {
         addTrace("mcp", "MCP connected but no tools were returned.");
         mcpEnabled = false;
@@ -247,17 +302,19 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       }
       addTrace("mcp", "MCP disabled for this turn.", msg);
       mcpEnabled = false;
-      if (localShellEnabled) {
-        openAiTools = [...localTools];
+      if (localShellEnabled || supervisorEnabled) {
+        openAiTools = [...localTools, ...supervisorTools];
         if (output) {
-          output.appendLine("[joshgpt] Falling back to local shell tool for this turn.");
+          output.appendLine(
+            "[joshgpt] Falling back to extension-local tools for this turn."
+          );
         }
-        addTrace("tool", "Fallback enabled: local shell tool remains active.");
+        addTrace("tool", "Fallback enabled: extension-local tools remain active.");
       }
     }
-  } else if (localShellEnabled) {
-    openAiTools = [...localTools];
-    addTrace("tool", "MCP disabled; local shell tool is active.");
+  } else if (localShellEnabled || supervisorEnabled) {
+    openAiTools = [...localTools, ...supervisorTools];
+    addTrace("tool", "MCP disabled; extension-local tools are active.");
   }
 
   if (localShellEnabled) {
@@ -267,6 +324,16 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
     if (!hasLocalShellTool) {
       openAiTools = [...localTools, ...openAiTools];
       addTrace("tool", "Ensured local shell tool availability for this turn.");
+    }
+  }
+  if (supervisorEnabled) {
+    const hasSupervisorTool = openAiTools.some(
+      (tool) =>
+        tool && tool.function && tool.function.name === SUPERVISOR_WRAPPER_TOOL_NAME
+    );
+    if (!hasSupervisorTool) {
+      openAiTools = [...supervisorTools, ...openAiTools];
+      addTrace("tool", "Ensured supervisor wrapper tool availability for this turn.");
     }
   }
 
@@ -359,6 +426,31 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
           const msg = err instanceof Error ? err.message : String(err);
           toolResultText = `Local shell tool failed: ${msg}`;
           addTrace("tool-error", `Local shell failed: ${toolName}`, msg);
+        }
+      } else if (toolName === SUPERVISOR_WRAPPER_TOOL_NAME) {
+        const wrapperResult = await runSupervisorWrapperToolCall(args, {
+          dispatcherBaseUrl: config.supervisorDispatcherBaseUrl,
+          capabilityBaseUrl: config.supervisorCapabilityBaseUrl,
+          timeoutMs: config.mcpTimeoutMs,
+          output
+        });
+        toolResultText = JSON.stringify(wrapperResult, null, 2);
+        addTrace(
+          "supervisor",
+          `Supervisor wrapper result: action=${wrapperResult.action}`,
+          toolResultText.slice(0, 1200)
+        );
+        if (wrapperResult.action === "terminate") {
+          addTrace(
+            "supervisor",
+            "Supervisor returned terminal decision; ending tool loop."
+          );
+          return {
+            text: buildGuardedSupervisorMessage(wrapperResult),
+            usedTools: true,
+            rounds: round + 1,
+            trace
+          };
         }
       } else {
         try {

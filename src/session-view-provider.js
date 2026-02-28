@@ -3,6 +3,7 @@
 const vscode = require("vscode");
 const { SessionStore } = require("./session-store");
 const { runChatWithOptionalMcp } = require("./chat-runner");
+const { resolveInheritedInstructions } = require("./instruction-resolver");
 
 const SETTINGS_EXTENSION_ID = "josh-phillips-llc.joshgpt";
 const SETTINGS_FIELDS = [
@@ -18,6 +19,11 @@ const SETTINGS_FIELDS = [
   { key: "mcp.baseUrl", type: "string" },
   { key: "mcp.timeoutMs", type: "number", min: 1000 },
   { key: "mcp.maxToolRounds", type: "number", min: 1, max: 12 },
+  { key: "supervisor.enabled", type: "boolean" },
+  { key: "supervisor.dispatcherBaseUrl", type: "string" },
+  { key: "supervisor.capabilityBaseUrl", type: "string" },
+  { key: "instructions.inheritVscodeInstructions", type: "boolean" },
+  { key: "instructions.maxChars", type: "number", min: 1024 },
   { key: "localShell.enabled", type: "boolean" },
   { key: "localShell.defaultTimeoutSeconds", type: "number", min: 1 },
   { key: "localShell.maxTimeoutSeconds", type: "number", min: 1 },
@@ -259,7 +265,19 @@ class JoshGptSessionViewProvider {
         throw new Error("Active session disappeared before completion.");
       }
 
+      const instructionInheritance = resolveInheritedInstructions({
+        workspaceRoot: cfg.workspaceRoot,
+        enabled: cfg.instructionsInheritVscodeInstructions,
+        maxChars: cfg.instructionsMaxChars
+      });
+
       const modelMessages = [];
+      if (instructionInheritance.applied && instructionInheritance.systemMessage) {
+        modelMessages.push({
+          role: "system",
+          content: instructionInheritance.systemMessage
+        });
+      }
       if (cfg.systemPrompt) {
         modelMessages.push({ role: "system", content: cfg.systemPrompt });
       }
@@ -273,9 +291,15 @@ class JoshGptSessionViewProvider {
       this.output.appendLine(
         `[joshgpt] session completion request model=${cfg.model} messages=${modelMessages.length}`
       );
+      this.output.appendLine(
+        `[joshgpt] inherited_instructions=${instructionInheritance.applied ? "applied" : "not-applied"} canonical=${instructionInheritance.canonicalAvailable ? "yes" : "no"} hash=${instructionInheritance.contentHash || "<none>"} truncated=${instructionInheritance.truncated ? "yes" : "no"}`
+      );
 
       const { text, trace } = await runChatWithOptionalMcp({
-        config: cfg,
+        config: {
+          ...cfg,
+          instructionInheritance
+        },
         messages: modelMessages,
         output: this.output
       });
