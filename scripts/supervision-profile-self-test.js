@@ -61,6 +61,20 @@ function testSettingsFallback() {
   });
 }
 
+function testSettingsFallbackWorkerOnly() {
+  withTempDir((workspaceRoot) => {
+    const result = resolveSupervisionProfile({
+      workspaceRoot,
+      settingsFallback: {
+        workerRoleSlug: "fallback-worker"
+      }
+    });
+    assert.strictEqual(result.resolved, true);
+    assert.strictEqual(result.profile.workerRoleSlug, "fallback-worker");
+    assert.strictEqual(result.profile.supervisorRoleSlug, "");
+  });
+}
+
 function testMissingAllProfiles() {
   withTempDir((workspaceRoot) => {
     const result = resolveSupervisionProfile({
@@ -76,6 +90,7 @@ function testMissingAllProfiles() {
 function main() {
   testWorkspaceProfilePreferred();
   testSettingsFallback();
+  testSettingsFallbackWorkerOnly();
   testMissingAllProfiles();
   console.log("[supervision-profile-test] PASS");
 }

@@ -8,6 +8,8 @@ JoshGPT VS Code extension for LM Studio with MCP tools, canonical workspace inst
 - MCP tools: loaded from `joshgpt.mcp.baseUrl` (execution tools are hidden from model exposure).
 - Supervisor escalation: model-first + extension-side wrapper orchestration.
   - Wrapper internally orchestrates:
+    - `list_role_catalog`
+    - `get_supervisor_role_context`
     - `dispatch_role_task`
     - `submit_supervisor_question`
     - `ask_codex_supervisor`
@@ -39,12 +41,18 @@ Readiness:
 
 ## Supervision Profile Resolution
 
-Role bindings are resolved in this order:
+Worker role bindings are resolved in this order:
 
 1. `<workspaceRoot>/.joshgpt/supervision.json` (canonical)
 2. settings fallback:
    - `joshgpt.supervisor.workerRoleSlug`
    - `joshgpt.supervisor.supervisorRoleSlug`
+
+Effective supervisor role selection is resolved in this order:
+
+1. explicit assignment (`joshgpt.supervisor.assignedRoleSlug`) when present and valid in dispatcher registry
+2. supervision profile `supervisor_role_slug` when valid in dispatcher registry
+3. fail-safe `pause_for_human` if neither resolves to a registry role
 
 Canonical profile format:
 
@@ -99,10 +107,48 @@ Existing settings remain. Added cutover settings:
 - `joshgpt.supervisor.maxEscalationsPerTurn`
 - `joshgpt.supervisor.maxEscalationsPerSession`
 - `joshgpt.supervisor.escalationCooldownMs`
+- `joshgpt.supervisor.logLevel` (`off | normal | verbose`, default `normal`)
 - `joshgpt.supervisor.workerRoleSlug`
 - `joshgpt.supervisor.supervisorRoleSlug`
+- `joshgpt.supervisor.assignedRoleSlug`
+- `joshgpt.supervisor.roleCatalogCacheTtlMs`
 - `joshgpt.instructions.inheritVscodeInstructions`
 - `joshgpt.instructions.maxChars`
+
+UI/commands for no-code assignment:
+
+- Session view header: `Assign Supervisor` dropdown + `Refresh Roles`
+- Command Palette:
+  - `JoshGPT: Assign Supervisor Role`
+  - `JoshGPT: Refresh Supervisor Role Catalog`
+
+## Supervisor Telemetry
+
+Structured supervisor telemetry is written to **Output > JoshGPT** with prefix:
+
+- `[joshgpt:supervisor]`
+
+Log levels (`joshgpt.supervisor.logLevel`):
+
+- `off`: suppress supervisor telemetry output lines.
+- `normal`: lifecycle telemetry for each escalation:
+  - `escalation_start`
+  - `catalog_loaded`
+  - `role_selected`
+  - `context_loaded`
+  - `task_dispatched`
+  - `question_submitted`
+  - `supervisor_decision_received`
+  - `decision_recorded`
+  - `escalation_complete`
+  - `escalation_failed`
+- `verbose`: includes all `normal` entries plus per-stage timing and sanitized detail payloads.
+
+Redaction guarantees:
+
+- shared tokens/secrets/authorization fields are redacted.
+- full instruction excerpts (`agents_excerpt`, `runtime_policy_excerpt`) are not logged.
+- context refs and hashes are retained for correlation.
 
 ## Supervisor Decision Gating
 

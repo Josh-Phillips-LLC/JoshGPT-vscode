@@ -2,7 +2,7 @@
   "name": "joshgpt",
   "displayName": "JoshGPT",
   "description": "Minimal JoshGPT VS Code extension template with LM Studio support, local shell tooling, and optional MCP integrations.",
-  "version": "0.0.11",
+  "version": "0.0.13",
   "publisher": "josh-phillips-llc",
   "license": "Apache-2.0",
   "repository": {
@@ -31,7 +31,9 @@
     "onCommand:joshgpt.askModel",
     "onCommand:joshgpt.mcpStatus",
     "onCommand:joshgpt.checkSupervisorStatus",
-    "onCommand:joshgpt.escalateToSupervisor"
+    "onCommand:joshgpt.escalateToSupervisor",
+    "onCommand:joshgpt.assignSupervisorRole",
+    "onCommand:joshgpt.refreshSupervisorRoleCatalog"
   ],
   "main": "./src/extension.js",
   "contributes": {
@@ -59,6 +61,14 @@
       {
         "command": "joshgpt.escalateToSupervisor",
         "title": "JoshGPT: Escalate To Supervisor"
+      },
+      {
+        "command": "joshgpt.assignSupervisorRole",
+        "title": "JoshGPT: Assign Supervisor Role"
+      },
+      {
+        "command": "joshgpt.refreshSupervisorRoleCatalog",
+        "title": "JoshGPT: Refresh Supervisor Role Catalog"
       }
     ],
     "viewsContainers": {
@@ -190,6 +200,16 @@
           "minimum": 0,
           "description": "Guardrail: minimum cooldown interval between supervisor escalations."
         },
+        "joshgpt.supervisor.logLevel": {
+          "type": "string",
+          "default": "normal",
+          "enum": [
+            "off",
+            "normal",
+            "verbose"
+          ],
+          "description": "Supervisor telemetry verbosity in Output > JoshGPT. 'off' disables supervisor telemetry logs."
+        },
         "joshgpt.supervisor.workerRoleSlug": {
           "type": "string",
           "default": "",
@@ -199,6 +219,45 @@
           "type": "string",
           "default": "",
           "description": "Fallback supervisor role slug used when .joshgpt/supervision.json is missing."
+        },
+        "joshgpt.supervisor.assignedRoleSlug": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Optional explicit supervisor assignment (registry slug). When valid, this overrides supervision-profile supervisor role selection."
+        },
+        "joshgpt.supervisor.roleCatalogCacheTtlMs": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 1000,
+          "description": "Role catalog cache TTL in milliseconds before re-fetching list_role_catalog from dispatcher."
+        },
+        "joshgpt.telemetry.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable structured NDJSON telemetry logging for turn correlation."
+        },
+        "joshgpt.telemetry.logDir": {
+          "type": "string",
+          "default": ".joshgpt/logs",
+          "description": "Directory for telemetry NDJSON logs. Relative paths resolve from workspace root."
+        },
+        "joshgpt.telemetry.includeContent": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include prompt/response/tool payload content in telemetry events."
+        },
+        "joshgpt.telemetry.maxFileSizeMb": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "description": "Telemetry file rotation size in megabytes."
+        },
+        "joshgpt.telemetry.maxFiles": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "description": "Maximum rotated telemetry files to retain."
         },
         "joshgpt.instructions.inheritVscodeInstructions": {
           "type": "boolean",
@@ -265,6 +324,7 @@
     "test:native": "node ./scripts/native-stream-self-test.js",
     "test:mcp": "node ./scripts/mcp-self-test.js",
     "test:instructions": "node ./scripts/instruction-resolver-self-test.js",
+    "test:telemetry": "node ./scripts/telemetry-self-test.js",
     "test:supervision-profile": "node ./scripts/supervision-profile-self-test.js",
     "test:supervisor-readiness": "node ./scripts/supervisor-readiness-self-test.js",
     "test:supervisor-wrapper": "node ./scripts/supervisor-wrapper-self-test.js",

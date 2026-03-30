@@ -28,7 +28,9 @@ async function testHappyPath() {
       "http://127.0.0.1:8788/mcp": [
         "dispatch_role_task",
         "submit_supervisor_question",
-        "respond_supervisor_question"
+        "respond_supervisor_question",
+        "list_role_catalog",
+        "get_supervisor_role_context"
       ],
       "http://127.0.0.1:8789/mcp": ["ask_codex_supervisor"]
     })
@@ -46,7 +48,9 @@ async function testMissingToken() {
       "http://127.0.0.1:8788/mcp": [
         "dispatch_role_task",
         "submit_supervisor_question",
-        "respond_supervisor_question"
+        "respond_supervisor_question",
+        "list_role_catalog",
+        "get_supervisor_role_context"
       ],
       "http://127.0.0.1:8789/mcp": ["ask_codex_supervisor"]
     })

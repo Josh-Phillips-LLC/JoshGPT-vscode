@@ -53,13 +53,12 @@ function normalizeProfile(raw, { source, filePath }) {
     profile.supervisor_role_slug || profile.supervisorRoleSlug
   );
 
-  if (!workerRoleSlug || !supervisorRoleSlug) {
+  if (!workerRoleSlug) {
     return {
       ok: false,
       source,
       filePath,
-      error:
-        "Supervision profile requires non-empty worker_role_slug and supervisor_role_slug."
+      error: "Supervision profile requires non-empty worker_role_slug."
     };
   }
 
@@ -83,7 +82,8 @@ function normalizeProfile(raw, { source, filePath }) {
       requestedDecisionDefault: normalizeRequestedDecision(
         profile.requested_decision_default || profile.requestedDecisionDefault,
         DEFAULT_REQUESTED_DECISION
-      )
+      ),
+      supervisorRoleSlug
     }
   };
 }
@@ -144,9 +144,7 @@ function resolveProfileFromSettingsFallback(settingsFallback = {}) {
   if (!normalized.ok) {
     return {
       ...normalized,
-      error:
-        "Settings fallback requires joshgpt.supervisor.workerRoleSlug and " +
-        "joshgpt.supervisor.supervisorRoleSlug."
+      error: "Settings fallback requires joshgpt.supervisor.workerRoleSlug."
     };
   }
   return normalized;

@@ -11,14 +11,30 @@ const { createLocalShellMirror } = require("./local-shell-mirror");
 const { resolveInheritedInstructions } = require("./instruction-resolver");
 const { resolveSupervisionProfile } = require("./supervision-profile-resolver");
 const { checkSupervisorReadiness } = require("./supervisor-readiness");
+const {
+  TelemetryWriter,
+  makeTelemetryId,
+  emitTraceTelemetry
+} = require("./telemetry");
 
 const DEFAULT_MCP_BASE_URL = "http://127.0.0.1:8790/mcp";
 const DEFAULT_NATIVE_BASE_URL = "http://localhost:1234";
 const DEFAULT_SUPERVISOR_DISPATCHER_BASE_URL = "http://127.0.0.1:8788/mcp";
 const DEFAULT_SUPERVISOR_CAPABILITY_BASE_URL = "http://127.0.0.1:8789/mcp";
 const DEFAULT_INSTRUCTION_MAX_CHARS = 30000;
+const DEFAULT_SUPERVISOR_ROLE_CATALOG_CACHE_TTL_MS = 60000;
+const DEFAULT_SUPERVISOR_LOG_LEVEL = "normal";
 const DEFAULT_LOCAL_SHELL_TERMINAL_NAME = "JoshGPT Local Shell";
+const DEFAULT_TELEMETRY_LOG_DIR = ".joshgpt/logs";
 let runtimeLocalShellMirror = null;
+
+function normalizeSupervisorLogLevel(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "off" || normalized === "verbose") {
+    return normalized;
+  }
+  return DEFAULT_SUPERVISOR_LOG_LEVEL;
+}
 
 function getConfig() {
   const cfg = vscode.workspace.getConfiguration("joshgpt");
@@ -77,12 +93,22 @@ function getConfig() {
     supervisorEscalationCooldownMs: Number(
       rootCfg.get("joshgpt.supervisor.escalationCooldownMs") || 15000
     ),
+    supervisorLogLevel: normalizeSupervisorLogLevel(
+      rootCfg.get("joshgpt.supervisor.logLevel")
+    ),
     supervisorWorkerRoleSlug: String(
       rootCfg.get("joshgpt.supervisor.workerRoleSlug") || ""
     ).trim(),
     supervisorSupervisorRoleSlug: String(
       rootCfg.get("joshgpt.supervisor.supervisorRoleSlug") || ""
     ).trim(),
+    supervisorAssignedRoleSlug: String(
+      rootCfg.get("joshgpt.supervisor.assignedRoleSlug") || ""
+    ).trim(),
+    supervisorRoleCatalogCacheTtlMs: Number(
+      rootCfg.get("joshgpt.supervisor.roleCatalogCacheTtlMs") ||
+        DEFAULT_SUPERVISOR_ROLE_CATALOG_CACHE_TTL_MS
+    ),
     instructionsInheritVscodeInstructions: Boolean(
       rootCfg.get("joshgpt.instructions.inheritVscodeInstructions") ?? true
     ),
@@ -122,12 +148,34 @@ function getConfig() {
             }
           }
         : null,
+    telemetryEnabled: Boolean(rootCfg.get("joshgpt.telemetry.enabled") ?? true),
+    telemetryLogDir: String(
+      rootCfg.get("joshgpt.telemetry.logDir") || DEFAULT_TELEMETRY_LOG_DIR
+    ).trim() || DEFAULT_TELEMETRY_LOG_DIR,
+    telemetryIncludeContent: Boolean(
+      rootCfg.get("joshgpt.telemetry.includeContent") ?? false
+    ),
+    telemetryMaxFileSizeMb: Number(
+      rootCfg.get("joshgpt.telemetry.maxFileSizeMb") || 10
+    ),
+    telemetryMaxFiles: Number(rootCfg.get("joshgpt.telemetry.maxFiles") || 5),
     workspaceRoot:
       vscode.workspace.workspaceFolders &&
       vscode.workspace.workspaceFolders.length > 0
         ? vscode.workspace.workspaceFolders[0].uri.fsPath
         : process.cwd()
   };
+}
+
+function createTelemetryWriter(cfg) {
+  return new TelemetryWriter({
+    enabled: Boolean(cfg.telemetryEnabled),
+    workspaceRoot: cfg.workspaceRoot,
+    logDir: cfg.telemetryLogDir,
+    includeContent: Boolean(cfg.telemetryIncludeContent),
+    maxFileSizeMb: Number(cfg.telemetryMaxFileSizeMb || 10),
+    maxFiles: Number(cfg.telemetryMaxFiles || 5)
+  });
 }
 
 async function listModels(output) {
@@ -227,22 +275,86 @@ async function askModel(output) {
     `[joshgpt] local_shell_terminal_mirror=${cfg.localShellMirrorTerminalEnabled ? "enabled" : "disabled"} name="${cfg.localShellMirrorTerminalName}"`
   );
 
-  const { text } = await runChatWithOptionalMcp({
-    config: {
-      ...cfg,
-      instructionInheritance,
-      supervisorSessionContext: {
-        objective: userPrompt,
-        roleContextRef: instructionInheritance.canonicalPath || "workspace://AGENTS.md",
-        attemptHistory: [],
-        evidenceSummary: "",
-        blockedReason: "insufficient_context",
-        currentPhase: "validation",
-        requestedDecision: "next_step"
+  const telemetry = createTelemetryWriter(cfg);
+  const correlation = {
+    chatSessionId: makeTelemetryId("adhoc-session"),
+    turnId: makeTelemetryId("turn"),
+    requestIdFactory: () => makeTelemetryId("req")
+  };
+  telemetry.log({
+    event: "turn.start",
+    message: "Ad-hoc Ask Model turn started.",
+    chat_session_id: correlation.chatSessionId,
+    turn_id: correlation.turnId,
+    component: "extension",
+    operation: "askModel",
+    status: "start",
+    model: String(cfg.model || "")
+  });
+
+  let result;
+  try {
+    result = await runChatWithOptionalMcp({
+      config: {
+        ...cfg,
+        telemetry,
+        correlation,
+        instructionInheritance,
+        supervisorSessionContext: {
+          objective: userPrompt,
+          roleContextRef: instructionInheritance.canonicalPath || "workspace://AGENTS.md",
+          attemptHistory: [],
+          evidenceSummary: "",
+          blockedReason: "insufficient_context",
+          currentPhase: "validation",
+          requestedDecision: "next_step"
+        }
+      },
+      messages: modelMessages,
+      output
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    telemetry.log({
+      event: "turn.error",
+      level: "error",
+      message: "Ad-hoc Ask Model turn failed.",
+      chat_session_id: correlation.chatSessionId,
+      turn_id: correlation.turnId,
+      component: "extension",
+      operation: "askModel",
+      status: "error",
+      model: String(cfg.model || ""),
+      error_code: "ask_model_failed",
+      attrs: {
+        error: msg
       }
-    },
-    messages: modelMessages,
-    output
+    });
+    throw err;
+  }
+
+  const { text, trace, rounds, usedTools } = result;
+  telemetry.log({
+    event: "turn.complete",
+    message: "Ad-hoc Ask Model turn completed.",
+    chat_session_id: correlation.chatSessionId,
+    turn_id: correlation.turnId,
+    component: "extension",
+    operation: "askModel",
+    status: "ok",
+    model: String(cfg.model || ""),
+    attrs: {
+      rounds: Number(rounds || 0),
+      used_tools: Boolean(usedTools)
+    }
+  });
+  emitTraceTelemetry(telemetry, trace, correlation, {
+    component: "chat-runner",
+    model: String(cfg.model || ""),
+    endpoint:
+      cfg.chatEndpointMode === "lmstudio-native-stream"
+        ? `${cfg.nativeBaseUrl}/api/v1/chat`
+        : `${cfg.baseUrl}/chat/completions`
   });
 
   output.appendLine("[joshgpt] response received");
@@ -307,6 +419,9 @@ async function supervisorStatus(output) {
   output.appendLine(`[joshgpt] supervisor_summary=${readiness.summary}`);
   output.appendLine(
     `[joshgpt] supervision_profile_source=${profile.source} resolved=${profile.resolved ? "yes" : "no"}`
+  );
+  output.appendLine(
+    `[joshgpt] assigned_supervisor_role_slug=${cfg.supervisorAssignedRoleSlug || "<auto-profile>"}`
   );
   if (profile.warning) {
     output.appendLine(`[joshgpt] supervision_profile_warning=${profile.warning}`);
@@ -415,6 +530,32 @@ function activate(context) {
       try {
         await vscode.commands.executeCommand("workbench.view.extension.joshgpt");
         await sessionProvider.escalateActiveSessionFromCommand();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        output.appendLine(`[joshgpt] error: ${msg}`);
+        vscode.window.showErrorMessage(msg);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("joshgpt.assignSupervisorRole", async () => {
+      try {
+        await vscode.commands.executeCommand("workbench.view.extension.joshgpt");
+        await sessionProvider.assignSupervisorRoleFromCommand();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        output.appendLine(`[joshgpt] error: ${msg}`);
+        vscode.window.showErrorMessage(msg);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("joshgpt.refreshSupervisorRoleCatalog", async () => {
+      try {
+        await vscode.commands.executeCommand("workbench.view.extension.joshgpt");
+        await sessionProvider.refreshSupervisorRoleCatalogFromCommand();
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         output.appendLine(`[joshgpt] error: ${msg}`);

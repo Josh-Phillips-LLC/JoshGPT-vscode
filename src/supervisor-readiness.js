@@ -5,7 +5,9 @@ const { McpHttpClient } = require("./mcp-client");
 const REQUIRED_DISPATCHER_TOOLS = [
   "dispatch_role_task",
   "submit_supervisor_question",
-  "respond_supervisor_question"
+  "respond_supervisor_question",
+  "list_role_catalog",
+  "get_supervisor_role_context"
 ];
 const REQUIRED_CAPABILITY_TOOLS = ["ask_codex_supervisor"];
 

@@ -13,17 +13,20 @@ function inferNativeBaseUrl(baseUrl) {
   return normalized;
 }
 
-function buildHeaders(apiKey) {
+function buildHeaders(apiKey, correlationHeaders = {}) {
   return {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${apiKey || "lm-studio"}`
+    Authorization: `Bearer ${apiKey || "lm-studio"}`,
+    ...(correlationHeaders && typeof correlationHeaders === "object"
+      ? correlationHeaders
+      : {})
   };
 }
 
-async function listModels({ baseUrl, apiKey }) {
+async function listModels({ baseUrl, apiKey, correlationHeaders }) {
   const normalizedBase = normalizeBaseUrl(baseUrl);
   const res = await fetch(`${normalizedBase}/models`, {
-    headers: buildHeaders(apiKey)
+    headers: buildHeaders(apiKey, correlationHeaders)
   });
 
   if (!res.ok) {
@@ -52,7 +55,8 @@ async function createChatCompletion({
   temperature,
   maxTokens,
   tools,
-  toolChoice
+  toolChoice,
+  correlationHeaders
 }) {
   const normalizedBase = normalizeBaseUrl(baseUrl);
   const payloadMessages =
@@ -77,7 +81,7 @@ async function createChatCompletion({
 
   const res = await fetch(`${normalizedBase}/chat/completions`, {
     method: "POST",
-    headers: buildHeaders(apiKey),
+    headers: buildHeaders(apiKey, correlationHeaders),
     body: JSON.stringify(payload)
   });
 
@@ -249,7 +253,8 @@ async function createNativeStreamingChat({
   userPrompt,
   temperature,
   maxTokens,
-  onEvent
+  onEvent,
+  correlationHeaders
 }) {
   const normalizedNativeBase = normalizeBaseUrl(nativeBaseUrl || inferNativeBaseUrl(baseUrl));
   if (!normalizedNativeBase) {
@@ -271,7 +276,7 @@ async function createNativeStreamingChat({
 
   const res = await fetch(endpoint, {
     method: "POST",
-    headers: buildHeaders(apiKey),
+    headers: buildHeaders(apiKey, correlationHeaders),
     body: JSON.stringify(payload)
   });
 

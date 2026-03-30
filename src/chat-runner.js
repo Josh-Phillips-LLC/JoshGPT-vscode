@@ -1,10 +1,14 @@
 "use strict";
 
+const crypto = require("crypto");
 const {
   createChatCompletion,
   createNativeStreamingChat
 } = require("./lmstudio-client");
 const { McpHttpClient } = require("./mcp-client");
+const {
+  buildCorrelationHeaders
+} = require("./telemetry");
 const {
   LOCAL_SHELL_TOOL_NAME,
   getLocalShellOpenAiTool,
@@ -15,6 +19,7 @@ const {
   INTERNAL_SUPERVISOR_TOOL_NAMES,
   getSupervisorWrapperOpenAiTool,
   evaluateSupervisorEscalationGuardrails,
+  emitSupervisorLog,
   buildGuardrailBlockedWrapperResult,
   runSupervisorWrapperToolCall,
   buildGuardedSupervisorMessage
@@ -199,8 +204,23 @@ function formatSupervisorCheckDetails(result, stage) {
   );
 }
 
-async function runNativeStreamingMode({ config, messages, output, trace, addTrace }) {
+async function runNativeStreamingMode({
+  config,
+  messages,
+  output,
+  trace,
+  addTrace,
+  emitTelemetry,
+  nextRequestId,
+  correlationContext
+}) {
   addTrace("start", "Prompt execution started (mode=lmstudio-native-stream).");
+  emitTelemetry({
+    event: "turn.start",
+    message: "Prompt execution started (lmstudio-native-stream).",
+    operation: "turn",
+    status: "start"
+  });
 
   if (config.mcpEnabled) {
     addTrace(
@@ -209,29 +229,83 @@ async function runNativeStreamingMode({ config, messages, output, trace, addTrac
     );
   }
 
-  const streamResult = await createNativeStreamingChat({
-    nativeBaseUrl: config.nativeBaseUrl,
-    baseUrl: config.baseUrl,
-    apiKey: config.apiKey,
-    model: config.model,
-    messages,
-    temperature: config.temperature,
-    maxTokens: config.maxTokens,
-    onEvent: (event) => {
-      const name = String(event.event || "event");
-      const lowered = name.toLowerCase();
-      const delta = typeof event.deltaText === "string" ? event.deltaText : "";
-      const details = delta || summarizeEventData(event.data);
-
-      if (lowered.startsWith("reasoning.")) {
-        addTrace("reasoning", name, details);
-      } else if (lowered === "done" || lowered.endsWith(".done") || lowered.endsWith(".completed")) {
-        addTrace("stream-end", name, details);
-      } else {
-        addTrace("stream", name, details);
-      }
-    }
+  const lmRequestId = nextRequestId();
+  emitTelemetry({
+    event: "lm.request.start",
+    message: "LM native stream request started.",
+    operation: "lmstudio.native_stream",
+    status: "start",
+    request_id: lmRequestId,
+    endpoint: `${config.nativeBaseUrl}/api/v1/chat`,
+    model: String(config.model || "")
   });
+
+  const startedAtMs = Date.now();
+  let streamResult;
+  try {
+    streamResult = await createNativeStreamingChat({
+      nativeBaseUrl: config.nativeBaseUrl,
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey,
+      model: config.model,
+      messages,
+      temperature: config.temperature,
+      maxTokens: config.maxTokens,
+      correlationHeaders: buildCorrelationHeaders({
+        chatSessionId: correlationContext.chatSessionId,
+        turnId: correlationContext.turnId,
+        requestId: lmRequestId
+      }),
+      onEvent: (event) => {
+        const name = String(event.event || "event");
+        const lowered = name.toLowerCase();
+        const delta = typeof event.deltaText === "string" ? event.deltaText : "";
+        const details = delta || summarizeEventData(event.data);
+
+        if (lowered.startsWith("reasoning.")) {
+          addTrace("reasoning", name, details);
+        } else if (
+          lowered === "done" ||
+          lowered.endsWith(".done") ||
+          lowered.endsWith(".completed")
+        ) {
+          addTrace("stream-end", name, details);
+        } else {
+          addTrace("stream", name, details);
+        }
+      }
+    });
+    emitTelemetry({
+      event: "lm.request.complete",
+      message: "LM native stream request completed.",
+      operation: "lmstudio.native_stream",
+      status: "ok",
+      request_id: lmRequestId,
+      endpoint: `${config.nativeBaseUrl}/api/v1/chat`,
+      model: String(config.model || ""),
+      duration_ms: Math.max(0, Date.now() - startedAtMs),
+      attrs: {
+        event_count: Array.isArray(streamResult.events) ? streamResult.events.length : 0
+      }
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    emitTelemetry({
+      event: "lm.request.error",
+      message: "LM native stream request failed.",
+      operation: "lmstudio.native_stream",
+      status: "error",
+      request_id: lmRequestId,
+      endpoint: `${config.nativeBaseUrl}/api/v1/chat`,
+      model: String(config.model || ""),
+      duration_ms: Math.max(0, Date.now() - startedAtMs),
+      error_code: "lm_request_failed",
+      attrs: {
+        error: msg
+      }
+    });
+    throw err;
+  }
 
   if (output) {
     output.appendLine(
@@ -244,6 +318,15 @@ async function runNativeStreamingMode({ config, messages, output, trace, addTrac
     "Native streaming response completed.",
     `events=${streamResult.events.length}`
   );
+  emitTelemetry({
+    event: "turn.complete",
+    message: "Prompt execution completed (lmstudio-native-stream).",
+    operation: "turn",
+    status: "ok",
+    attrs: {
+      rounds: 1
+    }
+  });
 
   return {
     text:
@@ -266,6 +349,47 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
     });
   }
 
+  const telemetry =
+    config && config.telemetry && typeof config.telemetry.log === "function"
+      ? config.telemetry
+      : null;
+  const correlation = config && config.correlation && typeof config.correlation === "object"
+    ? config.correlation
+    : {};
+  const correlationContext = {
+    chatSessionId: String(correlation.chatSessionId || "unknown"),
+    turnId: String(correlation.turnId || "unknown")
+  };
+  const requestIdFactory =
+    typeof correlation.requestIdFactory === "function"
+      ? correlation.requestIdFactory
+      : null;
+  function nextRequestId() {
+    if (requestIdFactory) {
+      try {
+        const value = String(requestIdFactory() || "").trim();
+        if (value) {
+          return value;
+        }
+      } catch {
+        // Fall through to generated ID.
+      }
+    }
+    return `req-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+  }
+  function emitTelemetry(payload = {}) {
+    if (!telemetry) {
+      return;
+    }
+    telemetry.log({
+      service: "joshgpt-vscode",
+      source: "vscode",
+      chat_session_id: correlationContext.chatSessionId,
+      turn_id: correlationContext.turnId,
+      ...payload
+    });
+  }
+
   if (config.chatEndpointMode === "lmstudio-native-stream") {
     addInstructionTrace(addTrace, config.instructionInheritance);
     return runNativeStreamingMode({
@@ -273,7 +397,10 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       messages,
       output,
       trace,
-      addTrace
+      addTrace,
+      emitTelemetry,
+      nextRequestId,
+      correlationContext
     });
   }
 
@@ -324,6 +451,14 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
     "start",
     `Prompt execution started (mcp=${mcpEnabled ? "enabled" : "disabled"}, local_shell=${localShellEnabled ? "enabled" : "disabled"}, supervisor=${supervisorEnabled ? "enabled" : "disabled"})`
   );
+  emitTelemetry({
+    event: "turn.start",
+    message: "Prompt execution started.",
+    component: "chat-runner",
+    operation: "turn",
+    status: "start",
+    model: String(config.model || "")
+  });
   if (supervisorEnabled) {
     if (supervisorProfileResolution.resolved) {
       addTrace(
@@ -335,7 +470,10 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
             profile_file: supervisorProfileResolution.filePath || null,
             worker_role_slug: supervisorProfileResolution.profile?.workerRoleSlug || "",
             supervisor_role_slug:
-              supervisorProfileResolution.profile?.supervisorRoleSlug || ""
+              supervisorProfileResolution.profile?.supervisorRoleSlug || "",
+            assigned_supervisor_role_slug: String(
+              config.supervisorAssignedRoleSlug || ""
+            )
           },
           null,
           2
@@ -369,7 +507,13 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       mcpClient = new McpHttpClient({
         baseUrl: config.mcpBaseUrl,
         timeoutMs: config.mcpTimeoutMs,
-        output
+        output,
+        correlation: {
+          chatSessionId: correlationContext.chatSessionId,
+          turnId: correlationContext.turnId
+        },
+        requestIdFactory: nextRequestId,
+        telemetry
       });
       const mcpTools = await mcpClient.listTools();
       const mcpOpenAiTools = asOpenAiTools(mcpTools, MCP_HIDDEN_TOOL_NAMES);
@@ -398,6 +542,17 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       if (output) {
         output.appendLine(`[joshgpt] MCP disabled for this turn: ${msg}`);
       }
+      emitTelemetry({
+        event: "mcp.disabled",
+        message: "MCP disabled for this turn.",
+        component: "chat-runner",
+        operation: "mcp.bootstrap",
+        status: "error",
+        error_code: "mcp_bootstrap_failed",
+        attrs: {
+          error: msg
+        }
+      });
       addTrace("mcp", "MCP disabled for this turn.", msg);
       mcpEnabled = false;
       if (localShellEnabled || supervisorEnabled) {
@@ -478,16 +633,75 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
       `Round ${round + 1}: requesting model completion.`,
       `message_count=${workingMessages.length}`
     );
-    const response = await createChatCompletion({
-      baseUrl: config.baseUrl,
-      apiKey: config.apiKey,
-      model: config.model,
-      messages: workingMessages,
-      temperature: config.temperature,
-      maxTokens: config.maxTokens,
-      tools: toolChoiceEnabled ? openAiTools : undefined,
-      toolChoice: toolChoiceEnabled ? "auto" : undefined
+    const lmRequestId = nextRequestId();
+    const lmStartedAtMs = Date.now();
+    emitTelemetry({
+      event: "lm.request.start",
+      message: "LM chat completion request started.",
+      component: "chat-runner",
+      operation: "lmstudio.chat_completion",
+      status: "start",
+      request_id: lmRequestId,
+      model: String(config.model || ""),
+      endpoint: `${config.baseUrl}/chat/completions`,
+      attrs: {
+        round: round + 1,
+        message_count: workingMessages.length,
+        tool_count: toolChoiceEnabled ? openAiTools.length : 0
+      }
     });
+
+    let response;
+    try {
+      response = await createChatCompletion({
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        model: config.model,
+        messages: workingMessages,
+        temperature: config.temperature,
+        maxTokens: config.maxTokens,
+        tools: toolChoiceEnabled ? openAiTools : undefined,
+        toolChoice: toolChoiceEnabled ? "auto" : undefined,
+        correlationHeaders: buildCorrelationHeaders({
+          chatSessionId: correlationContext.chatSessionId,
+          turnId: correlationContext.turnId,
+          requestId: lmRequestId
+        })
+      });
+      emitTelemetry({
+        event: "lm.request.complete",
+        message: "LM chat completion request completed.",
+        component: "chat-runner",
+        operation: "lmstudio.chat_completion",
+        status: "ok",
+        request_id: lmRequestId,
+        model: String(config.model || ""),
+        endpoint: `${config.baseUrl}/chat/completions`,
+        duration_ms: Math.max(0, Date.now() - lmStartedAtMs),
+        attrs: {
+          round: round + 1
+        }
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      emitTelemetry({
+        event: "lm.request.error",
+        message: "LM chat completion request failed.",
+        component: "chat-runner",
+        operation: "lmstudio.chat_completion",
+        status: "error",
+        request_id: lmRequestId,
+        model: String(config.model || ""),
+        endpoint: `${config.baseUrl}/chat/completions`,
+        duration_ms: Math.max(0, Date.now() - lmStartedAtMs),
+        error_code: "lm_request_failed",
+        attrs: {
+          round: round + 1,
+          error: msg
+        }
+      });
+      throw err;
+    }
 
     const toolCallCount = countToolCalls(response);
     addTrace(
@@ -496,6 +710,18 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
     );
     if (toolCallCount === 0) {
       addTrace("final", "Model returned final response without additional tool calls.");
+      emitTelemetry({
+        event: "turn.complete",
+        message: "Prompt execution completed.",
+        component: "chat-runner",
+        operation: "turn",
+        status: "ok",
+        model: String(config.model || ""),
+        attrs: {
+          rounds: round + 1,
+          used_tools: usedToolsInTurn
+        }
+      });
       return {
         text: response.text,
         usedTools: usedToolsInTurn,
@@ -536,6 +762,20 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
 
       let toolResultText;
       if (toolName === LOCAL_SHELL_TOOL_NAME) {
+        const localShellRequestId = nextRequestId();
+        const localShellStartedAtMs = Date.now();
+        emitTelemetry({
+          event: "local_shell.start",
+          message: "Local shell tool call started.",
+          component: "chat-runner",
+          operation: "local_shell",
+          status: "start",
+          request_id: localShellRequestId,
+          tool_call_id: String(toolCall.id || ""),
+          attrs: {
+            tool_name: toolName
+          }
+        });
         try {
           const localResult = await runLocalShellToolCall(args, {
             workspaceRoot: config.workspaceRoot,
@@ -551,10 +791,39 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
             `Local shell result: ${toolName}`,
             toolResultText.slice(0, 1200)
           );
+          emitTelemetry({
+            event: "local_shell.complete",
+            message: "Local shell tool call completed.",
+            component: "chat-runner",
+            operation: "local_shell",
+            status: "ok",
+            request_id: localShellRequestId,
+            tool_call_id: String(toolCall.id || ""),
+            duration_ms: Math.max(0, Date.now() - localShellStartedAtMs),
+            attrs: {
+              tool_name: toolName,
+              exit_code: Number(localResult && localResult.exit_code)
+            }
+          });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           toolResultText = `Local shell tool failed: ${msg}`;
           addTrace("tool-error", `Local shell failed: ${toolName}`, msg);
+          emitTelemetry({
+            event: "local_shell.error",
+            message: "Local shell tool call failed.",
+            component: "chat-runner",
+            operation: "local_shell",
+            status: "error",
+            request_id: localShellRequestId,
+            tool_call_id: String(toolCall.id || ""),
+            duration_ms: Math.max(0, Date.now() - localShellStartedAtMs),
+            error_code: "local_shell_failed",
+            attrs: {
+              tool_name: toolName,
+              error: msg
+            }
+          });
         }
       } else if (toolName === SUPERVISOR_WRAPPER_TOOL_NAME) {
         addTrace(
@@ -587,14 +856,30 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
         });
         let wrapperResult;
         if (!supervisorProfileResolution.resolved) {
+          emitSupervisorLog(output, config.supervisorLogLevel, "escalation_blocked", {
+            invocation_source: "model_tool",
+            reason_type: "profile_unresolved",
+            reason:
+              supervisorProfileResolution.error || "role binding unavailable."
+          });
           wrapperResult = buildGuardrailBlockedWrapperResult(
             `Missing supervision profile: ${supervisorProfileResolution.error || "role binding unavailable."}`
           );
         } else if (!supervisorPreflight.ready) {
+          emitSupervisorLog(output, config.supervisorLogLevel, "escalation_blocked", {
+            invocation_source: "model_tool",
+            reason_type: "preflight_blocked",
+            reason: supervisorPreflight.summary
+          });
           wrapperResult = buildGuardrailBlockedWrapperResult(
             `Supervisor preflight blocked: ${supervisorPreflight.summary}`
           );
         } else if (!guardrailEval.allowed) {
+          emitSupervisorLog(output, config.supervisorLogLevel, "escalation_blocked", {
+            invocation_source: "model_tool",
+            reason_type: "guardrail_denied",
+            reason: guardrailEval.reason
+          });
           wrapperResult = buildGuardrailBlockedWrapperResult(guardrailEval.reason);
         } else {
           supervisorGuardrailState = guardrailEval.state;
@@ -605,7 +890,17 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
             output,
             supervisionProfile: supervisorProfileResolution.profile,
             supervisionProfileSource: supervisorProfileResolution.source,
-            sessionContext: config.supervisorSessionContext || {}
+            assignedSupervisorRoleSlug: config.supervisorAssignedRoleSlug,
+            logLevel: config.supervisorLogLevel,
+            invocationSource: "model_tool",
+            sessionContext: config.supervisorSessionContext || {},
+            telemetry,
+            correlation: {
+              chatSessionId: correlationContext.chatSessionId,
+              turnId: correlationContext.turnId,
+              toolCallId: String(toolCall.id || ""),
+              requestIdFactory: nextRequestId
+            }
           });
         }
         toolResultText = JSON.stringify(wrapperResult, null, 2);
@@ -623,6 +918,18 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
             "supervisor",
             "Supervisor returned terminal decision; ending tool loop."
           );
+          emitTelemetry({
+            event: "turn.complete",
+            message: "Prompt execution terminated by supervisor decision.",
+            component: "chat-runner",
+            operation: "turn",
+            status: "ok",
+            model: String(config.model || ""),
+            attrs: {
+              rounds: round + 1,
+              supervisor_action: wrapperResult.action
+            }
+          });
           return {
             text: buildGuardedSupervisorMessage(wrapperResult),
             usedTools: true,
@@ -636,7 +943,9 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
           if (!mcpClient) {
             throw new Error("MCP client unavailable for non-local tool.");
           }
-          const result = await mcpClient.callTool(toolName, args);
+          const result = await mcpClient.callTool(toolName, args, {
+            toolCallId: String(toolCall.id || "")
+          });
           toolResultText = stringifyToolResult(result);
           addTrace(
             "tool",
@@ -664,6 +973,18 @@ async function runChatWithOptionalMcp({ config, messages, output }) {
     "Stopped after reaching max tool-call rounds.",
     `max_rounds=${maxRounds}`
   );
+  emitTelemetry({
+    event: "turn.complete",
+    message: "Prompt execution reached max tool-call rounds.",
+    component: "chat-runner",
+    operation: "turn",
+    status: "ok",
+    model: String(config.model || ""),
+    attrs: {
+      rounds: maxRounds,
+      used_tools: true
+    }
+  });
   return {
     text:
       "Reached tool-call round limit before final response. Increase joshgpt.mcp.maxToolRounds if needed.",
